@@ -23,6 +23,45 @@ pub const SHADER_STAGE_COMPUTE: u32 =
     crate::VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT as u32;
 pub const SHADER_STAGE_ALL_GRAPHICS: u32 = SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT;
 
+/// Specialization constants for pipeline compilation
+#[derive(Default)]
+pub struct SpecializationConstants {
+    entries: Vec<crate::VkSpecializationMapEntry>,
+    data: Vec<u8>,
+}
+
+impl SpecializationConstants {
+    /// Create a new empty specialization constants builder
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a u32 constant
+    pub fn add_u32(mut self, constant_id: u32, value: u32) -> Self {
+        let offset = self.data.len();
+        self.data.extend_from_slice(&value.to_ne_bytes());
+        self.entries.push(crate::VkSpecializationMapEntry {
+            constantID: constant_id,
+            offset: offset as u32,
+            size: std::mem::size_of::<u32>(),
+        });
+        self
+    }
+
+    /// Build Vulkan specialization info (returns None if no entries)
+    pub fn build(&self) -> Option<crate::VkSpecializationInfo> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        Some(crate::VkSpecializationInfo {
+            mapEntryCount: self.entries.len() as u32,
+            pMapEntries: self.entries.as_ptr(),
+            dataSize: self.data.len(),
+            pData: self.data.as_ptr() as *const std::ffi::c_void,
+        })
+    }
+}
+
 /// Memory types for allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryType {
@@ -576,6 +615,20 @@ impl GpuAllocation {
             std::ptr::copy_nonoverlapping(data.as_ptr(), self.cpu_ptr, data.len());
         }
         Ok(())
+    }
+
+    /// Convert a host pointer within this allocation to a device pointer
+    pub fn host_to_device_ptr(&self, host_ptr: *const u8) -> u64 {
+        if host_ptr.is_null() || self.cpu_ptr.is_null() {
+            return 0;
+        }
+        let host_ptr = host_ptr as usize;
+        let base_ptr = self.cpu_ptr as usize;
+        if host_ptr < base_ptr || host_ptr >= base_ptr + self.size {
+            return 0;
+        }
+        let offset = host_ptr - base_ptr;
+        self.gpu_ptr + offset as u64
     }
 
     /// Get the Vulkan buffer handle
@@ -1308,11 +1361,14 @@ impl GraphicsPipeline {
         layout: &PipelineLayout,
         render_pass: crate::VkRenderPass,
         _format: Format,
+        vertex_specialization: Option<&SpecializationConstants>,
+        fragment_specialization: Option<&SpecializationConstants>,
     ) -> Result<Self> {
         use std::ptr;
 
         unsafe {
             // Shader stage creation info
+            let vertex_specialization_info = vertex_specialization.and_then(|s| s.build());
             let vertex_stage = crate::VkPipelineShaderStageCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 pNext: ptr::null(),
@@ -1320,9 +1376,12 @@ impl GraphicsPipeline {
                 stage: crate::VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT,
                 module: vertex_shader.vk_module(),
                 pName: b"main\0".as_ptr() as *const i8,
-                pSpecializationInfo: ptr::null(),
+                pSpecializationInfo: vertex_specialization_info
+                    .as_ref()
+                    .map_or(std::ptr::null(), |info| info as *const _),
             };
 
+            let fragment_specialization_info = fragment_specialization.and_then(|s| s.build());
             let fragment_stage = crate::VkPipelineShaderStageCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 pNext: ptr::null(),
@@ -1330,7 +1389,9 @@ impl GraphicsPipeline {
                 stage: crate::VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT,
                 module: fragment_shader.vk_module(),
                 pName: b"main\0".as_ptr() as *const i8,
-                pSpecializationInfo: ptr::null(),
+                pSpecializationInfo: fragment_specialization_info
+                    .as_ref()
+                    .map_or(std::ptr::null(), |info| info as *const _),
             };
 
             let shader_stages = [vertex_stage, fragment_stage];
@@ -1531,10 +1592,12 @@ impl ComputePipeline {
         context: &GraphicsContext,
         shader: &ShaderModule,
         layout: &PipelineLayout,
+        specialization: Option<&SpecializationConstants>,
     ) -> Result<Self> {
         use std::ptr;
 
         unsafe {
+            let specialization_info = specialization.and_then(|s| s.build());
             let stage_info = crate::VkPipelineShaderStageCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 pNext: ptr::null(),
@@ -1542,7 +1605,9 @@ impl ComputePipeline {
                 stage: crate::VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT,
                 module: shader.vk_module(),
                 pName: b"main\0".as_ptr() as *const i8,
-                pSpecializationInfo: ptr::null(),
+                pSpecializationInfo: specialization_info
+                    .as_ref()
+                    .map_or(std::ptr::null(), |info| info as *const _),
             };
 
             let pipeline_info = crate::VkComputePipelineCreateInfo {

@@ -106,6 +106,8 @@ fn main() -> Result<(), String> {
         &layout,
         swapchain.render_pass(),
         rust_and_vulkan::simple::Format::Bgra8Unorm, // matches swapchain format
+        None,
+        None,
     )
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
     println!("Graphics pipeline created.");

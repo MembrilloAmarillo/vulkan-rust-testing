@@ -53,7 +53,7 @@ fn main() -> Result<(), String> {
 
     // Create compute pipeline
     println!("Creating compute pipeline...");
-    let pipeline = ComputePipeline::new(&context, &shader, &layout)
+    let pipeline = ComputePipeline::new(&context, &shader, &layout, None)
         .map_err(|e| format!("Failed to create compute pipeline: {}", e))?;
     println!("Compute pipeline created.");
 
