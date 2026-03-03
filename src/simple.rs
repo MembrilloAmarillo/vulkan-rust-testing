@@ -1527,7 +1527,7 @@ impl GraphicsPipeline {
                 depthClampEnable: 0,
                 rasterizerDiscardEnable: 0,
                 polygonMode: crate::VkPolygonMode::VK_POLYGON_MODE_FILL,
-                cullMode: crate::VkCullModeFlagBits::VK_CULL_MODE_BACK_BIT as u32,
+                cullMode: crate::VkCullModeFlagBits::VK_CULL_MODE_NONE as u32,
                 frontFace: crate::VkFrontFace::VK_FRONT_FACE_CLOCKWISE,
                 depthBiasEnable: 0,
                 depthBiasConstantFactor: 0.0,

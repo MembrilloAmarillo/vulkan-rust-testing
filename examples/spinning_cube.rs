@@ -170,19 +170,25 @@ fn main() -> Result<(), String> {
 
     // Initialize SDL3 and Vulkan
     let sdl = SdlContext::init()?;
+    eprintln!("SDL initialized");
     let window = SdlWindow::new("Spinning Cube - Press ESC to exit", 800, 600)?;
+    eprintln!("Window created");
     let instance = VulkanInstance::create(&sdl, &window)?;
-
+    eprintln!("Vulkan instance created");
     // Create surface
     let surface = VulkanSurface::create(&window, &instance)?;
+    eprintln!("Vulkan surface created");
 
     // Create Vulkan device
+    eprintln!("Creating Vulkan device...");
     let device = VulkanDevice::create(instance, Some(surface))?;
-
+    eprintln!("Vulkan device created");
     // Create graphics context for simple API
+    eprintln!("Creating graphics context...");
     let context = device
         .graphics_context()
         .map_err(|e| format!("Failed to create graphics context: {}", e))?;
+    eprintln!("Graphics context created successfully.");
 
     println!("Graphics context created successfully.");
 
@@ -281,6 +287,7 @@ fn main() -> Result<(), String> {
     let start_time = Instant::now();
     let mut last_print_time = start_time;
     let mut frame_count = 0;
+    let mut frames_rendered = 0;
 
     while !quit {
         // Handle events
@@ -331,6 +338,7 @@ fn main() -> Result<(), String> {
         unsafe {
             (*cpu_ptr).mvp = mvp;
         }
+        println!("MVP matrix updated, gpu_ptr=0x{:x}", gpu_ptr);
 
         // Acquire next image
         let image_index = swapchain
@@ -380,6 +388,12 @@ fn main() -> Result<(), String> {
         swapchain
             .present(image_index, acquire_semaphore)
             .map_err(|e| format!("Failed to present: {}", e))?;
+
+        frames_rendered += 1;
+        if frames_rendered >= 5 {
+            println!("Rendered 5 frames, exiting.");
+            quit = true;
+        }
 
         // Print FPS every second
         frame_count += 1;
