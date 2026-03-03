@@ -14,6 +14,27 @@ pub const STAGE_ALL: u32 =
     crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_ALL_COMMANDS_BIT as u32;
 pub const STAGE_HOST: u32 = crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_HOST_BIT as u32;
 
+// More granular graphics stages for hazard-aware barriers
+pub const STAGE_VERTEX_SHADER: u32 =
+    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_VERTEX_SHADER_BIT as u32;
+pub const STAGE_PIXEL_SHADER: u32 =
+    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT as u32;
+pub const STAGE_RASTER_COLOR_OUT: u32 =
+    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT as u32;
+pub const STAGE_RASTER_DEPTH_OUT: u32 =
+    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT as u32;
+pub const STAGE_DRAW_INDIRECT: u32 =
+    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT as u32;
+
+// Hazard flags for barrier cache invalidation
+bitflags::bitflags! {
+    pub struct HazardFlags: u32 {
+        const DRAW_ARGUMENTS = 1 << 0;
+        const DESCRIPTORS = 1 << 1;
+        const DEPTH_STENCIL = 1 << 2;
+    }
+}
+
 // Shader stage constants for pipeline layouts
 pub const SHADER_STAGE_VERTEX: u32 =
     crate::VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT as u32;
@@ -1757,8 +1778,14 @@ impl CommandBuffer {
         Ok(())
     }
 
-    /// Insert a pipeline barrier between stages
-    pub fn barrier(&self, src_stage: u32, dst_stage: u32) -> Result<()> {
+    /// Insert a pipeline barrier between stages with optional hazard flags
+    pub fn barrier(&self, src_stage: u32, dst_stage: u32, hazards: HazardFlags) -> Result<()> {
+        // For now, hazard flags are ignored - they would be used for additional
+        // cache invalidations (draw arguments, descriptors, depth stencil)
+        // In a full implementation, these would translate to additional
+        // Vulkan pipeline stage flags or memory barriers
+        let _ = hazards; // Mark as used
+
         unsafe {
             crate::vkCmdPipelineBarrier(
                 self.buffer,

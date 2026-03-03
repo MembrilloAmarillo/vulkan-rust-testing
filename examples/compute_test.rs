@@ -98,6 +98,7 @@ fn main() -> Result<(), String> {
     cmd.barrier(
         rust_and_vulkan::simple::STAGE_COMPUTE,
         rust_and_vulkan::simple::STAGE_TRANSFER,
+        rust_and_vulkan::simple::HazardFlags::empty(),
     )
     .map_err(|e| format!("Failed to insert barrier: {}", e))?;
 
