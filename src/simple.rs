@@ -92,12 +92,21 @@ pub enum Format {
 }
 
 impl Format {
-    fn _to_vk_format(&self) -> crate::VkFormat {
+    pub fn to_vk_format(&self) -> crate::VkFormat {
         match self {
             Format::Rgba8Unorm => crate::VkFormat::VK_FORMAT_R8G8B8A8_UNORM,
             Format::Bgra8Unorm => crate::VkFormat::VK_FORMAT_B8G8R8A8_UNORM,
             Format::Rgba32Float => crate::VkFormat::VK_FORMAT_R32G32B32A32_SFLOAT,
             Format::Depth32Float => crate::VkFormat::VK_FORMAT_D32_SFLOAT,
+        }
+    }
+
+    pub fn aspect_mask(&self) -> u32 {
+        match self {
+            Format::Rgba8Unorm | Format::Bgra8Unorm | Format::Rgba32Float => {
+                crate::VkImageAspectFlagBits::VK_IMAGE_ASPECT_COLOR_BIT as u32
+            }
+            Format::Depth32Float => crate::VkImageAspectFlagBits::VK_IMAGE_ASPECT_DEPTH_BIT as u32,
         }
     }
 }
@@ -289,6 +298,75 @@ impl GraphicsContext {
     /// Free GPU memory (handled by Drop implementation of GpuAllocation)
     pub fn gpu_free(_allocation: GpuAllocation) {
         // Memory is freed when allocation goes out of scope
+    }
+
+    /// Get memory requirements for a texture with given parameters
+    pub fn texture_size_align(
+        &self,
+        width: u32,
+        height: u32,
+        format: Format,
+        usage: TextureUsage,
+    ) -> Result<(usize, usize)> {
+        use std::ptr;
+
+        // Convert usage flags to Vulkan image usage
+        let mut vk_usage = 0u32;
+        if usage.contains(TextureUsage::SAMPLED) {
+            vk_usage |= crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_SAMPLED_BIT as u32;
+        }
+        if usage.contains(TextureUsage::RENDER_TARGET) {
+            vk_usage |= crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT as u32;
+        }
+        if usage.contains(TextureUsage::DEPTH_STENCIL) {
+            vk_usage |=
+                crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT as u32;
+        }
+        if usage.contains(TextureUsage::TRANSFER_SRC) {
+            vk_usage |= crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_TRANSFER_SRC_BIT as u32;
+        }
+        if usage.contains(TextureUsage::TRANSFER_DST) {
+            vk_usage |= crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_TRANSFER_DST_BIT as u32;
+        }
+
+        unsafe {
+            let image_info = crate::VkImageCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                imageType: crate::VkImageType::VK_IMAGE_TYPE_2D,
+                format: format.to_vk_format(),
+                extent: crate::VkExtent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+                mipLevels: 1,
+                arrayLayers: 1,
+                samples: crate::VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT,
+                tiling: crate::VkImageTiling::VK_IMAGE_TILING_OPTIMAL,
+                usage: vk_usage,
+                sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
+                queueFamilyIndexCount: 0,
+                pQueueFamilyIndices: ptr::null(),
+                initialLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+            };
+
+            let mut image: crate::VkImage = ptr::null_mut();
+            let result = crate::vkCreateImage(self.device, &image_info, ptr::null(), &mut image);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create temporary image for size query: {:?}",
+                    result
+                )));
+            }
+
+            let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
+            crate::vkGetImageMemoryRequirements(self.device, image, &mut requirements);
+            crate::vkDestroyImage(self.device, image, ptr::null());
+
+            Ok((requirements.size as usize, requirements.alignment as usize))
+        }
     }
 
     /// Create a default sampler (linear filtering, repeat wrap)
@@ -790,7 +868,7 @@ impl Texture {
                 pNext: ptr::null(),
                 flags: 0,
                 imageType: crate::VkImageType::VK_IMAGE_TYPE_2D,
-                format: format._to_vk_format(),
+                format: format.to_vk_format(),
                 extent: crate::VkExtent3D {
                     width,
                     height,
@@ -1632,6 +1710,115 @@ impl CommandBuffer {
         Ok(())
     }
 
+    /// Transition texture layout to TRANSFER_DST_OPTIMAL for copying data
+    pub fn transition_to_transfer_dst(&self, texture: &Texture) {
+        unsafe {
+            let barrier = crate::VkImageMemoryBarrier {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                pNext: std::ptr::null(),
+                srcAccessMask: 0,
+                dstAccessMask: crate::VkAccessFlagBits::VK_ACCESS_TRANSFER_WRITE_BIT as u32,
+                oldLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+                newLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                srcQueueFamilyIndex: crate::VK_QUEUE_FAMILY_IGNORED as u32,
+                dstQueueFamilyIndex: crate::VK_QUEUE_FAMILY_IGNORED as u32,
+                image: texture.vk_image(),
+                subresourceRange: crate::VkImageSubresourceRange {
+                    aspectMask: texture.format().aspect_mask(),
+                    baseMipLevel: 0,
+                    levelCount: 1,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+            };
+            crate::vkCmdPipelineBarrier(
+                self.buffer,
+                crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT as u32,
+                crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TRANSFER_BIT as u32,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                1,
+                &barrier,
+            );
+        }
+    }
+
+    /// Transition texture layout from TRANSFER_DST_OPTIMAL to SHADER_READ_ONLY_OPTIMAL
+    pub fn transition_to_shader_read(&self, texture: &Texture) {
+        unsafe {
+            let barrier = crate::VkImageMemoryBarrier {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                pNext: std::ptr::null(),
+                srcAccessMask: crate::VkAccessFlagBits::VK_ACCESS_TRANSFER_WRITE_BIT as u32,
+                dstAccessMask: crate::VkAccessFlagBits::VK_ACCESS_SHADER_READ_BIT as u32,
+                oldLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                newLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                srcQueueFamilyIndex: crate::VK_QUEUE_FAMILY_IGNORED as u32,
+                dstQueueFamilyIndex: crate::VK_QUEUE_FAMILY_IGNORED as u32,
+                image: texture.vk_image(),
+                subresourceRange: crate::VkImageSubresourceRange {
+                    aspectMask: texture.format().aspect_mask(),
+                    baseMipLevel: 0,
+                    levelCount: 1,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+            };
+            crate::vkCmdPipelineBarrier(
+                self.buffer,
+                crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TRANSFER_BIT as u32,
+                crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT as u32,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                1,
+                &barrier,
+            );
+        }
+    }
+
+    /// Copy buffer data to texture (texture must be in TRANSFER_DST_OPTIMAL layout)
+    pub fn copy_buffer_to_texture(
+        &self,
+        src_buffer: &GpuAllocation,
+        dst_texture: &Texture,
+        width: u32,
+        height: u32,
+    ) {
+        unsafe {
+            let region = crate::VkBufferImageCopy {
+                bufferOffset: 0,
+                bufferRowLength: 0,
+                bufferImageHeight: 0,
+                imageSubresource: crate::VkImageSubresourceLayers {
+                    aspectMask: dst_texture.format().aspect_mask(),
+                    mipLevel: 0,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+                imageOffset: crate::VkOffset3D { x: 0, y: 0, z: 0 },
+                imageExtent: crate::VkExtent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+            crate::vkCmdCopyBufferToImage(
+                self.buffer,
+                src_buffer.buffer(),
+                dst_texture.vk_image(),
+                crate::VkImageLayout::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &region,
+            );
+        }
+    }
+
     /// Begin a render pass
     pub fn begin_render_pass(
         &self,
@@ -1860,7 +2047,7 @@ impl DescriptorHeap {
                 flags: 0,
                 image: texture.image,
                 viewType: crate::VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
-                format: texture.format._to_vk_format(),
+                format: texture.format.to_vk_format(),
                 components: crate::VkComponentMapping {
                     r: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
                     g: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
