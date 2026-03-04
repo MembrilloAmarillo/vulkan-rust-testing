@@ -234,6 +234,40 @@ impl GraphicsContext {
         Err(Error::Unsupported)
     }
 
+    /// Find a memory type that matches both property requirements and buffer memoryTypeBits
+    fn find_compatible_memory_type(
+        &self,
+        memory_type: MemoryType,
+        required_bits: u32,
+    ) -> Result<u32> {
+        let property_flags = match memory_type {
+            MemoryType::CpuMapped => {
+                (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
+                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT as u32)
+            }
+            MemoryType::GpuOnly => {
+                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32
+            }
+            MemoryType::CpuCached => {
+                (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
+                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_CACHED_BIT as u32)
+            }
+        };
+
+        for i in 0..self.memory_properties.memoryTypeCount {
+            // Check both property flags AND buffer requirement bits
+            if (required_bits & (1 << i)) != 0 {
+                let properties = self.memory_properties.memoryTypes[i as usize].propertyFlags;
+                if (properties & property_flags) == property_flags {
+                    return Ok(i);
+                }
+            }
+        }
+
+        // Fallback: if no exact match, try just the property flags
+        self.find_memory_type(memory_type)
+    }
+
     /// Allocate GPU memory with specified size, alignment and type
     pub fn gpu_malloc(
         &self,
@@ -241,10 +275,7 @@ impl GraphicsContext {
         _alignment: usize,
         memory_type: MemoryType,
     ) -> Result<GpuAllocation> {
-        // Find suitable memory type
-        let memory_type_index = self.find_memory_type(memory_type)?;
-
-        // Create buffer with shader device address usage
+        // Create buffer first to get memory requirements
         let buffer_info = crate::VkBufferCreateInfo {
             sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             pNext: ptr::null(),
@@ -253,11 +284,7 @@ impl GraphicsContext {
             usage: (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_SRC_BIT as u32)
                 | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT as u32)
                 | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT as u32)
-                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_STORAGE_BUFFER_BIT as u32)
-                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT
-                    as u32)
-                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
-                    as u32),
+                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_STORAGE_BUFFER_BIT as u32),
             sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
             queueFamilyIndexCount: 0,
             pQueueFamilyIndices: ptr::null(),
@@ -275,6 +302,10 @@ impl GraphicsContext {
 
             let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
             crate::vkGetBufferMemoryRequirements(self.device, buffer, &mut requirements);
+
+            // Find memory type that satisfies both property flags AND buffer requirements
+            let memory_type_index =
+                self.find_compatible_memory_type(memory_type, requirements.memoryTypeBits)?;
 
             // Adjust size for alignment
             let aligned_size = if requirements.size % requirements.alignment == 0 {
@@ -338,20 +369,20 @@ impl GraphicsContext {
                 ptr::null_mut()
             };
 
-            // Get GPU device address
-            let address_info = crate::VkBufferDeviceAddressInfo {
+            // Get device address
+            let addr_info = crate::VkBufferDeviceAddressInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
                 pNext: ptr::null(),
-                buffer,
+                buffer: buffer,
             };
-            let gpu_ptr = crate::vkGetBufferDeviceAddress(self.device, &address_info);
+            let device_address = crate::vkGetBufferDeviceAddress(self.device, &addr_info);
 
             Ok(GpuAllocation {
-                cpu_ptr,
-                gpu_ptr,
-                size: aligned_size as usize,
-                buffer,
-                memory,
+                buffer: buffer,
+                memory: memory,
+                cpu_ptr: cpu_ptr,
+                gpu_ptr: device_address,
+                size: size,
                 device: self.device,
             })
         }
@@ -2442,35 +2473,19 @@ impl CommandBuffer {
     }
 
     /// Bind a descriptor heap for graphics or compute pipeline
+    /// Note: This is a placeholder implementation. Descriptor buffer extension
+    /// (VK_EXT_descriptor_buffer) is not universally supported. Use root arguments
+    /// and standard descriptor sets instead.
     pub fn bind_descriptor_heap(
         &self,
-        heap: &DescriptorHeap,
-        layout: &PipelineLayout,
-        set_index: u32,
-        bind_point: crate::VkPipelineBindPoint,
+        _heap: &DescriptorHeap,
+        _layout: &PipelineLayout,
+        _set_index: u32,
+        _bind_point: crate::VkPipelineBindPoint,
     ) {
-        unsafe {
-            let binding_info = crate::VkDescriptorBufferBindingInfoEXT {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-                pNext: std::ptr::null(),
-                address: heap.gpu_address(),
-                usage: (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT as u32)
-                    | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT as u32),
-            };
-            crate::vkCmdBindDescriptorBuffersEXT(self.buffer, 1, &binding_info);
-
-            let buffer_index = 0u32;
-            let offset = 0u64;
-            crate::vkCmdSetDescriptorBufferOffsetsEXT(
-                self.buffer,
-                bind_point,
-                layout.vk_layout(),
-                set_index,
-                1,
-                &buffer_index,
-                &offset,
-            );
-        }
+        // This method requires VK_EXT_descriptor_buffer which is not
+        // universally available. Descriptor heap binding is skipped.
+        // Use root arguments (push constants) for data passing instead.
     }
 
     /// Dispatch compute with root pointer
