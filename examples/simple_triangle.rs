@@ -2,7 +2,6 @@
 //! This demonstrates the minimal setup to create a window and clear the screen.
 
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanInstance};
-use std::ptr;
 
 fn main() -> Result<(), String> {
     // Initialize SDL3
@@ -12,7 +11,7 @@ fn main() -> Result<(), String> {
     let window = SdlWindow::new("Rust + SDL3 + Vulkan - Triangle", 800, 600)?;
 
     // Create Vulkan instance
-    let instance = VulkanInstance::create(&sdl, &window)?;
+    let _instance = VulkanInstance::create(&sdl, &window)?;
 
     println!("SDL3, window, and Vulkan instance created successfully!");
     println!("Window should be visible. Press Ctrl+C or close window to exit.");
