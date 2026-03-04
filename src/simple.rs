@@ -1191,6 +1191,16 @@ impl Buffer {
             vk_usage |= crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT as u32;
         }
 
+        // Buffers accessed through device addresses (e.g. vertex pulling in shaders)
+        // must be created with SHADER_DEVICE_ADDRESS usage.
+        let needs_device_address = usage.intersects(
+            BufferUsage::VERTEX | BufferUsage::INDEX | BufferUsage::STORAGE | BufferUsage::UNIFORM,
+        );
+        if needs_device_address {
+            vk_usage |=
+                crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT as u32;
+        }
+
         unsafe {
             // Create buffer
             let buffer_info = crate::VkBufferCreateInfo {
@@ -1222,9 +1232,23 @@ impl Buffer {
                 context.find_compatible_memory_type(memory_type, requirements.memoryTypeBits)?;
 
             // Allocate memory
+            let mut memory_flags_info = crate::VkMemoryAllocateFlagsInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                pNext: ptr::null(),
+                flags: if needs_device_address {
+                    crate::VkMemoryAllocateFlagBits::VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT as u32
+                } else {
+                    0
+                },
+                deviceMask: 0,
+            };
             let alloc_info = crate::VkMemoryAllocateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                pNext: ptr::null(),
+                pNext: if needs_device_address {
+                    &mut memory_flags_info as *mut _ as *mut std::ffi::c_void
+                } else {
+                    ptr::null_mut()
+                },
                 allocationSize: requirements.size,
                 memoryTypeIndex: memory_type_index,
             };
@@ -4273,6 +4297,7 @@ pub struct FrameData {
     pub fence: Fence,
     pub image_available_semaphore: crate::VkSemaphore,
     pub render_finished_semaphore: crate::VkSemaphore,
+    device: crate::VkDevice,
 }
 
 impl FrameData {
@@ -4283,6 +4308,7 @@ impl FrameData {
             fence: Fence::create(context)?,
             image_available_semaphore: context.create_semaphore()?,
             render_finished_semaphore: context.create_semaphore()?,
+            device: context.device,
         })
     }
 
@@ -4309,5 +4335,22 @@ impl FrameData {
             signal_semaphores,
         )?;
         fence.wait_forever()
+    }
+}
+
+impl Drop for FrameData {
+    fn drop(&mut self) {
+        unsafe {
+            crate::vkDestroySemaphore(
+                self.device,
+                self.image_available_semaphore,
+                std::ptr::null(),
+            );
+            crate::vkDestroySemaphore(
+                self.device,
+                self.render_finished_semaphore,
+                std::ptr::null(),
+            );
+        }
     }
 }
