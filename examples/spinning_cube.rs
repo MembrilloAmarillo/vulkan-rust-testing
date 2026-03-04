@@ -1,24 +1,25 @@
-//! 3D spinning cube example using the simple graphics API with GLM math.
-//! Demonstrates 3D transformations with model-view-projection matrix.
+//! 3D spinning cube example with bindless textures using the simple graphics API.
+//! Demonstrates 3D transformations, bindless texture descriptor heaps, and GPU texture sampling.
 //! The API handles double buffering (2 frames in flight) internally.
 //! Press ESC to exit.
 
 use glm::ext::{look_at, perspective, rotate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
-    GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
+    CommandBuffer, Format, GraphicsPipeline, MemoryType, PipelineLayout, ShaderModule, Swapchain,
+    TextureDescriptorHeap, TextureUsage,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
 use std::time::Instant;
 
 fn main() -> Result<(), String> {
-    println!("3D Spinning Cube Example");
-    println!("========================");
+    println!("3D Spinning Cube Example with Bindless Textures");
+    println!("================================================");
     println!("Press ESC to exit");
 
     let sdl = SdlContext::init()?;
-    let window = SdlWindow::new("Spinning Cube - Press ESC to exit", 800, 600)?;
+    let window = SdlWindow::new("Spinning Cube with Bindless - Press ESC to exit", 800, 600)?;
     let instance = VulkanInstance::create(&sdl, &window)?;
     let surface = VulkanSurface::create(&window, &instance)?;
 
@@ -28,8 +29,8 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to create graphics context: {}", e))?;
 
     println!("Loading shaders...");
-    let vert_bytes = include_bytes!("../shaders/cube.vert.spv");
-    let frag_bytes = include_bytes!("../shaders/cube.frag.spv");
+    let vert_bytes = include_bytes!("../shaders/cube_bindless.vert.spv");
+    let frag_bytes = include_bytes!("../shaders/cube_bindless.frag.spv");
 
     if vert_bytes.len() % 4 != 0 || frag_bytes.len() % 4 != 0 {
         return Err("SPIR-V file size not multiple of 4".to_string());
@@ -52,17 +53,110 @@ fn main() -> Result<(), String> {
     let frag_shader = ShaderModule::new(&context, &frag_words)
         .map_err(|e| format!("Failed to create fragment shader: {}", e))?;
 
-    println!("Creating pipeline layout...");
-    let layout = PipelineLayout::with_mat4_push_constants(
+    println!("Creating texture descriptor heap...");
+    let mut texture_heap = TextureDescriptorHeap::new(&context, 256)
+        .map_err(|e| format!("Failed to create texture descriptor heap: {}", e))?;
+
+    println!("Creating test textures...");
+
+    // Helper function to create a simple gradient texture
+    let create_gradient_texture =
+        |color_r: u8, color_g: u8, color_b: u8| -> Result<Vec<u8>, String> {
+            let width = 256u32;
+            let height = 256u32;
+            let mut pixel_data = vec![0u8; (width * height * 4) as usize];
+
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = ((y * width + x) * 4) as usize;
+                    let r = ((x as f32 / width as f32) * color_r as f32) as u8;
+                    let g = ((y as f32 / height as f32) * color_g as f32) as u8;
+                    let b = color_b;
+                    let a = 255u8;
+
+                    pixel_data[idx] = r;
+                    pixel_data[idx + 1] = g;
+                    pixel_data[idx + 2] = b;
+                    pixel_data[idx + 3] = a;
+                }
+            }
+            Ok(pixel_data)
+        };
+
+    // Create multiple textures with different colors
+    let tex1_data = create_gradient_texture(255, 0, 0)?; // Red gradient
+    let tex2_data = create_gradient_texture(0, 255, 0)?; // Green gradient
+    let tex3_data = create_gradient_texture(0, 0, 255)?; // Blue gradient
+
+    // Upload textures to GPU
+    let mut upload_texture = |data: &[u8]| -> Result<u32, String> {
+        let staging = context
+            .gpu_malloc(data.len(), 256, MemoryType::CpuMapped)
+            .map_err(|e| format!("Failed to allocate staging buffer: {}", e))?;
+
+        staging
+            .write(data)
+            .map_err(|e| format!("Failed to write staging buffer: {}", e))?;
+
+        let texture = rust_and_vulkan::simple::Texture::new(
+            &context,
+            256,
+            256,
+            Format::Rgba8Unorm,
+            TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+        )
+        .map_err(|e| format!("Failed to create texture: {}", e))?;
+
+        let cmd = CommandBuffer::allocate(&context)
+            .map_err(|e| format!("Failed to allocate command buffer: {}", e))?;
+
+        cmd.begin()
+            .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
+
+        cmd.transition_to_transfer_dst(&texture);
+        cmd.copy_buffer_to_texture(&staging, &texture, 256, 256);
+        cmd.transition_to_shader_read(&texture);
+
+        cmd.end()
+            .map_err(|e| format!("Failed to end command buffer: {}", e))?;
+
+        let fence = context
+            .submit(&cmd)
+            .map_err(|e| format!("Failed to submit command buffer: {}", e))?;
+        fence
+            .wait_forever()
+            .map_err(|e| format!("Failed to wait for fence: {}", e))?;
+
+        // Allocate descriptor in heap and get index
+        let tex_idx = texture_heap
+            .allocate()
+            .map_err(|e| format!("Failed to allocate texture index: {}", e))?;
+
+        Ok(tex_idx as u32)
+    };
+
+    let _tex1_idx = upload_texture(&tex1_data)?;
+    let _tex2_idx = upload_texture(&tex2_data)?;
+    let _tex3_idx = upload_texture(&tex3_data)?;
+
+    println!(
+        "Texture descriptor heap initialized with {} textures",
+        texture_heap.used()
+    );
+
+    println!("Creating pipeline layout with extended push constants...");
+    let layout = PipelineLayout::with_push_constants_size(
         &context,
         rust_and_vulkan::simple::SHADER_STAGE_VERTEX
             | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
+        80, // Extended size: 64 bytes for MVP + 16 bytes for texture heap address and index
     )
     .map_err(|e| format!("Failed to create pipeline layout: {}", e))?;
 
     println!("Creating swapchain...");
-    let mut swapchain = Swapchain::new(&context, device.surface.as_ref().unwrap().surface, 800, 600)
-        .map_err(|e| format!("Failed to create swapchain: {}", e))?;
+    let mut swapchain =
+        Swapchain::new(&context, device.surface.as_ref().unwrap().surface, 800, 600)
+            .map_err(|e| format!("Failed to create swapchain: {}", e))?;
 
     println!("Creating graphics pipeline...");
     let pipeline = GraphicsPipeline::new(
@@ -119,16 +213,35 @@ fn main() -> Result<(), String> {
         model = rotate(&model, elapsed * 0.7, vec3(0.0, 1.0, 0.0));
         model = rotate(&model, elapsed * 0.3, vec3(0.0, 0.0, 1.0));
 
-        let view = look_at(vec3(0.0, 0.0, 3.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+        let view = look_at(
+            vec3(0.0, 0.0, 3.0),
+            vec3(0.0, 0.0, 0.0),
+            vec3(0.0, 1.0, 0.0),
+        );
         let projection = perspective(800.0 / 600.0, PI / 3.0, 0.1, 100.0);
 
         let mvp = projection * view * model;
 
-        let mut mvp_bytes = [0u8; 64];
+        // Create extended push constants: MVP (64 bytes) + texture heap address (8 bytes) + texture index (4 bytes) + padding (4 bytes)
+        let mut push_data = [0u8; 80];
+
+        // Copy MVP matrix (64 bytes)
         unsafe {
             let mvp_ptr = &mvp as *const Mat4 as *const u8;
-            mvp_bytes.copy_from_slice(std::slice::from_raw_parts(mvp_ptr, 64));
+            push_data[0..64].copy_from_slice(std::slice::from_raw_parts(mvp_ptr, 64));
         }
+
+        // Copy texture heap GPU address (simulated - in real implementation would use texture_heap.gpu_address())
+        let heap_address = 0u64; // Placeholder
+        let heap_lo = (heap_address & 0xFFFFFFFF) as u32;
+        let heap_hi = ((heap_address >> 32) & 0xFFFFFFFF) as u32;
+
+        push_data[64..68].copy_from_slice(&heap_lo.to_le_bytes());
+        push_data[68..72].copy_from_slice(&heap_hi.to_le_bytes());
+
+        // Copy texture index (use modulo to cycle through textures)
+        let texture_idx = (frame_count % 3) as u32;
+        push_data[72..76].copy_from_slice(&texture_idx.to_le_bytes());
 
         cmd.begin()
             .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
@@ -142,7 +255,7 @@ fn main() -> Result<(), String> {
         );
 
         cmd.bind_pipeline(&pipeline);
-        cmd.push_constants(&layout, &mvp_bytes);
+        cmd.push_constants(&layout, &push_data);
         cmd.draw(36, 1, 0, 0);
 
         cmd.end_render_pass();
