@@ -1266,6 +1266,18 @@ impl Buffer {
         self.buffer
     }
 
+    /// Get the GPU device address for this buffer.
+    pub fn device_address(&self) -> u64 {
+        unsafe {
+            let info = crate::VkBufferDeviceAddressInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                pNext: ptr::null(),
+                buffer: self.buffer,
+            };
+            crate::vkGetBufferDeviceAddress(self.device, &info)
+        }
+    }
+
     /// Get buffer size in bytes
     pub fn size(&self) -> usize {
         self.size
