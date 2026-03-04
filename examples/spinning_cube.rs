@@ -1,199 +1,15 @@
-//! 3D spinning cube example using the simple graphics API.
+//! 3D spinning cube example using the simple graphics API with GLM math.
 //! Demonstrates 3D transformations with model-view-projection matrix.
 //! Press ESC to exit.
 
-use rust_and_vulkan::simple::CommandBuffer;
-use rust_and_vulkan::simple::Swapchain;
-use rust_and_vulkan::simple::{GraphicsPipeline, PipelineLayout, ShaderModule};
+use glm::ext::{look_at, perspective, rotate};
+use glm::{mat4, vec3, Mat4};
+use rust_and_vulkan::simple::{
+    CommandBuffer, GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
+};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
 use std::time::Instant;
-
-// Simple 4x4 matrix for 3D transformations
-#[repr(C, align(16))]
-#[derive(Copy, Clone)]
-struct Mat4 {
-    data: [[f32; 4]; 4],
-}
-
-impl Mat4 {
-    fn identity() -> Self {
-        Self {
-            data: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        }
-    }
-
-    fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Self {
-        let f = 1.0 / (fov_y * 0.5).tan();
-        let nf = 1.0 / (near - far);
-
-        Self {
-            data: [
-                [f / aspect, 0.0, 0.0, 0.0],
-                [0.0, f, 0.0, 0.0],
-                [0.0, 0.0, (far + near) * nf, -1.0],
-                [0.0, 0.0, (2.0 * far * near) * nf, 0.0],
-            ],
-        }
-    }
-
-    fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> Self {
-        let f = {
-            let mut f = [0.0; 3];
-            for i in 0..3 {
-                f[i] = center[i] - eye[i];
-            }
-            let len = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
-            for i in 0..3 {
-                f[i] /= len;
-            }
-            f
-        };
-
-        let s = {
-            let mut s = [0.0; 3];
-            s[0] = f[1] * up[2] - f[2] * up[1];
-            s[1] = f[2] * up[0] - f[0] * up[2];
-            s[2] = f[0] * up[1] - f[1] * up[0];
-            let len = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
-            for i in 0..3 {
-                s[i] /= len;
-            }
-            s
-        };
-
-        let u = {
-            let mut u = [0.0; 3];
-            u[0] = s[1] * f[2] - s[2] * f[1];
-            u[1] = s[2] * f[0] - s[0] * f[2];
-            u[2] = s[0] * f[1] - s[1] * f[0];
-            u
-        };
-
-        Self {
-            data: [
-                [s[0], s[1], s[2], 0.0],
-                [u[0], u[1], u[2], 0.0],
-                [-f[0], -f[1], -f[2], 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        }
-        .translate([-eye[0], -eye[1], -eye[2]])
-    }
-
-    fn translate(&self, v: [f32; 3]) -> Self {
-        let mut result = *self;
-        result.data[3][0] = self.data[0][0] * v[0]
-            + self.data[1][0] * v[1]
-            + self.data[2][0] * v[2]
-            + self.data[3][0];
-        result.data[3][1] = self.data[0][1] * v[0]
-            + self.data[1][1] * v[1]
-            + self.data[2][1] * v[2]
-            + self.data[3][1];
-        result.data[3][2] = self.data[0][2] * v[0]
-            + self.data[1][2] * v[1]
-            + self.data[2][2] * v[2]
-            + self.data[3][2];
-        result.data[3][3] = self.data[0][3] * v[0]
-            + self.data[1][3] * v[1]
-            + self.data[2][3] * v[2]
-            + self.data[3][3];
-        result
-    }
-
-    fn rotate_x(&self, angle: f32) -> Self {
-        let s = angle.sin();
-        let c = angle.cos();
-        let rotation = Self {
-            data: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, c, s, 0.0],
-                [0.0, -s, c, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        };
-        self.mul(&rotation)
-    }
-
-    fn rotate_y(&self, angle: f32) -> Self {
-        let s = angle.sin();
-        let c = angle.cos();
-        let rotation = Self {
-            data: [
-                [c, 0.0, -s, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [s, 0.0, c, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        };
-        self.mul(&rotation)
-    }
-
-    fn rotate_z(&self, angle: f32) -> Self {
-        let s = angle.sin();
-        let c = angle.cos();
-        let rotation = Self {
-            data: [
-                [c, s, 0.0, 0.0],
-                [-s, c, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        };
-        self.mul(&rotation)
-    }
-
-    fn mul(&self, other: &Self) -> Self {
-        let mut result = Self::identity();
-        for i in 0..4 {
-            for j in 0..4 {
-                result.data[i][j] = self.data[i][0] * other.data[0][j]
-                    + self.data[i][1] * other.data[1][j]
-                    + self.data[i][2] * other.data[2][j]
-                    + self.data[i][3] * other.data[3][j];
-            }
-        }
-        result
-    }
-
-    #[allow(dead_code)]
-    fn transpose(&self) -> Self {
-        Self {
-            data: [
-                [
-                    self.data[0][0],
-                    self.data[1][0],
-                    self.data[2][0],
-                    self.data[3][0],
-                ],
-                [
-                    self.data[0][1],
-                    self.data[1][1],
-                    self.data[2][1],
-                    self.data[3][1],
-                ],
-                [
-                    self.data[0][2],
-                    self.data[1][2],
-                    self.data[2][2],
-                    self.data[3][2],
-                ],
-                [
-                    self.data[0][3],
-                    self.data[1][3],
-                    self.data[2][3],
-                    self.data[3][3],
-                ],
-            ],
-        }
-    }
-}
 
 fn main() -> Result<(), String> {
     println!("3D Spinning Cube Example");
@@ -335,40 +151,49 @@ fn main() -> Result<(), String> {
         // Update MVP matrix based on elapsed time
         let elapsed = start_time.elapsed().as_secs_f32();
 
-        // Create model matrix with rotation
-        let model = Mat4::identity()
-            .rotate_x(elapsed * 0.5)
-            .rotate_y(elapsed * 0.7)
-            .rotate_z(elapsed * 0.3);
-
-        // Create view matrix (camera)
-        let view = Mat4::look_at(
-            [0.0, 0.0, 3.0], // eye
-            [0.0, 0.0, 0.0], // center
-            [0.0, 1.0, 0.0], // up
+        // Create model matrix with rotation using GLM
+        let mut model: Mat4 = mat4(
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
+        model = rotate(&model, elapsed * 0.5, vec3(1.0, 0.0, 0.0));
+        model = rotate(&model, elapsed * 0.7, vec3(0.0, 1.0, 0.0));
+        model = rotate(&model, elapsed * 0.3, vec3(0.0, 0.0, 1.0));
 
-        // Create projection matrix
-        let projection = Mat4::perspective(
-            PI / 3.0,      // 60 degrees FOV
+        // Create view matrix (camera) using GLM
+        let eye = vec3(0.0, 0.0, 3.0);
+        let center = vec3(0.0, 0.0, 0.0);
+        let up = vec3(0.0, 1.0, 0.0);
+        let view = look_at(eye, center, up);
+
+        // Create projection matrix using GLM
+        let projection = perspective(
             800.0 / 600.0, // aspect ratio
+            PI / 3.0,      // 60 degrees FOV
             0.1,           // near
             100.0,         // far
         );
 
         // MVP = projection * view * model
-        let mvp = projection.mul(&view).mul(&model);
+        let mvp = projection * view * model;
+
+        // Debug: Print MVP matrix on first frame
+        if frame_count == 0 && elapsed < 0.1 {
+            println!("\nMVP Matrix (first frame):");
+            for row in 0..4 {
+                println!(
+                    "  [{:.4}, {:.4}, {:.4}, {:.4}]",
+                    mvp.c0[row], mvp.c1[row], mvp.c2[row], mvp.c3[row]
+                );
+            }
+            println!();
+        }
 
         // Prepare MVP matrix bytes for push constants
-        // GLSL uses column-major order, so we need to pack columns sequentially
+        // GLM stores matrices in column-major order, so we can pack directly
         let mut mvp_bytes = [0u8; 64]; // mat4 = 4x4 f32 = 64 bytes
-        for col in 0..4 {
-            for row in 0..4 {
-                let f = mvp.data[row][col]; // Get element at [row][col]
-                let bytes = f.to_ne_bytes();
-                let offset = (col * 4 + row) * 4; // Column-major packing: col * 4 + row
-                mvp_bytes[offset..offset + 4].copy_from_slice(&bytes);
-            }
+        unsafe {
+            let mvp_ptr = &mvp as *const Mat4 as *const u8;
+            mvp_bytes.copy_from_slice(std::slice::from_raw_parts(mvp_ptr, 64));
         }
 
         // Acquire next image (signals image_available_semaphore when ready)
@@ -438,6 +263,11 @@ fn main() -> Result<(), String> {
             frame_count = 0;
         }
     }
+
+    // Wait for GPU to finish all operations before cleanup
+    context
+        .wait_idle()
+        .map_err(|e| format!("Failed to wait for device idle: {}", e))?;
 
     // Cleanup semaphores
     for sem in image_available_semaphores {

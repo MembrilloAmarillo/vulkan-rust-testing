@@ -591,6 +591,20 @@ impl GraphicsContext {
         }
     }
 
+    /// Wait for all operations on the device to complete
+    pub fn wait_idle(&self) -> Result<()> {
+        unsafe {
+            let result = crate::vkDeviceWaitIdle(self.device);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to wait for device idle: {:?}",
+                    result
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Submit a command buffer to the graphics queue and return a fence
     pub fn submit(&self, command_buffer: &CommandBuffer) -> Result<Fence> {
         self.submit_with_semaphores(command_buffer, &[], &[])

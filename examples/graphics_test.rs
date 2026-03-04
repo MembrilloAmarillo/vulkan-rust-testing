@@ -245,6 +245,11 @@ fn main() -> Result<(), String> {
         println!("Test completed after {} frames.", frames_rendered);
     }
 
+    // Wait for GPU to finish all operations before cleanup
+    context
+        .wait_idle()
+        .map_err(|e| format!("Failed to wait for device idle: {}", e))?;
+
     // Cleanup semaphores
     for sem in image_available_semaphores {
         context.destroy_semaphore(sem);

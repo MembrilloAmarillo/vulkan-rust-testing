@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 libc = "0.2"
 bitflags = "2.11"
+glm = "0.3"
 
 [build-dependencies]
 bindgen = "0.69"
