@@ -161,6 +161,38 @@ impl Mat4 {
         }
         result
     }
+
+    #[allow(dead_code)]
+    fn transpose(&self) -> Self {
+        Self {
+            data: [
+                [
+                    self.data[0][0],
+                    self.data[1][0],
+                    self.data[2][0],
+                    self.data[3][0],
+                ],
+                [
+                    self.data[0][1],
+                    self.data[1][1],
+                    self.data[2][1],
+                    self.data[3][1],
+                ],
+                [
+                    self.data[0][2],
+                    self.data[1][2],
+                    self.data[2][2],
+                    self.data[3][2],
+                ],
+                [
+                    self.data[0][3],
+                    self.data[1][3],
+                    self.data[2][3],
+                    self.data[3][3],
+                ],
+            ],
+        }
+    }
 }
 
 fn main() -> Result<(), String> {
@@ -328,13 +360,13 @@ fn main() -> Result<(), String> {
         let mvp = projection.mul(&view).mul(&model);
 
         // Prepare MVP matrix bytes for push constants
-        // Convert matrix to a flat array of f32 for push constants
+        // GLSL uses column-major order, so we need to pack columns sequentially
         let mut mvp_bytes = [0u8; 64]; // mat4 = 4x4 f32 = 64 bytes
-        for i in 0..4 {
-            for j in 0..4 {
-                let f = mvp.data[i][j];
+        for col in 0..4 {
+            for row in 0..4 {
+                let f = mvp.data[row][col]; // Get element at [row][col]
                 let bytes = f.to_ne_bytes();
-                let offset = (i * 4 + j) * 4;
+                let offset = (col * 4 + row) * 4; // Column-major packing: col * 4 + row
                 mvp_bytes[offset..offset + 4].copy_from_slice(&bytes);
             }
         }
