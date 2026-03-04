@@ -2,8 +2,7 @@
 //! Shows texture descriptor heap, root arguments, and texture upload.
 
 use rust_and_vulkan::simple::{
-    CommandBuffer, Format, GraphicsContext, MemoryType, PipelineLayout, RootArguments,
-    TextureDescriptorHeap, TextureUsage,
+    CommandBuffer, PipelineLayout, RootArguments, TextureDescriptorHeap,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 
@@ -131,9 +130,13 @@ fn main() -> Result<(), String> {
     println!("   Texture heap bound (conceptual - actual implementation pending).");
     println!();
 
-    // Test 8: Set root arguments
-    println!("9. Setting root arguments...");
+    // Test 8: Begin command buffer and set root arguments
+    println!("9. Beginning command buffer and setting root arguments...");
+    cmd.begin()
+        .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
     cmd.set_graphics_root_arguments(&pipeline_layout, &root_args);
+    cmd.end()
+        .map_err(|e| format!("Failed to end command buffer: {}", e))?;
     println!("   Root arguments set via push constants.");
     println!();
 
