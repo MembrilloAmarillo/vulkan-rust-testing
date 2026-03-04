@@ -1,12 +1,12 @@
 //! 3D spinning cube example using the simple graphics API with GLM math.
 //! Demonstrates 3D transformations with model-view-projection matrix.
-//! Uses double buffering (2 frames in flight) for efficient GPU pipelining.
+//! The API handles double buffering (2 frames in flight) internally.
 //! Press ESC to exit.
 
 use glm::ext::{look_at, perspective, rotate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
-    FrameData, GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
+    GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
@@ -17,41 +17,24 @@ fn main() -> Result<(), String> {
     println!("========================");
     println!("Press ESC to exit");
 
-    // Initialize SDL3 and Vulkan
     let sdl = SdlContext::init()?;
-    eprintln!("SDL initialized");
     let window = SdlWindow::new("Spinning Cube - Press ESC to exit", 800, 600)?;
-    eprintln!("Window created");
     let instance = VulkanInstance::create(&sdl, &window)?;
-    eprintln!("Vulkan instance created");
-    // Create surface
     let surface = VulkanSurface::create(&window, &instance)?;
-    eprintln!("Vulkan surface created");
 
-    // Create Vulkan device
-    eprintln!("Creating Vulkan device...");
     let device = VulkanDevice::create(instance, Some(surface))?;
-    eprintln!("Vulkan device created");
-    // Create graphics context for simple API
-    eprintln!("Creating graphics context...");
     let context = device
         .graphics_context()
         .map_err(|e| format!("Failed to create graphics context: {}", e))?;
-    eprintln!("Graphics context created successfully.");
 
-    println!("Graphics context created successfully.");
-
-    // Load SPIR-V shaders
     println!("Loading shaders...");
     let vert_bytes = include_bytes!("../shaders/cube.vert.spv");
     let frag_bytes = include_bytes!("../shaders/cube.frag.spv");
 
-    // Ensure length is multiple of 4 (SPIR-V word size)
     if vert_bytes.len() % 4 != 0 || frag_bytes.len() % 4 != 0 {
         return Err("SPIR-V file size not multiple of 4".to_string());
     }
 
-    // Convert bytes to u32 words (SPIR-V is little-endian)
     let mut vert_words = Vec::with_capacity(vert_bytes.len() / 4);
     for chunk in vert_bytes.chunks_exact(4) {
         let word = u32::from_le_bytes(chunk.try_into().unwrap());
@@ -68,9 +51,7 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to create vertex shader: {}", e))?;
     let frag_shader = ShaderModule::new(&context, &frag_words)
         .map_err(|e| format!("Failed to create fragment shader: {}", e))?;
-    println!("Shader modules created.");
 
-    // Create pipeline layout with push constants for MVP matrix (graphics stages)
     println!("Creating pipeline layout...");
     let layout = PipelineLayout::with_mat4_push_constants(
         &context,
@@ -78,15 +59,11 @@ fn main() -> Result<(), String> {
             | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
     )
     .map_err(|e| format!("Failed to create pipeline layout: {}", e))?;
-    println!("Pipeline layout created.");
 
-    // Create swapchain
     println!("Creating swapchain...");
-    let swapchain = Swapchain::new(&context, device.surface.as_ref().unwrap().surface, 800, 600)
+    let mut swapchain = Swapchain::new(&context, device.surface.as_ref().unwrap().surface, 800, 600)
         .map_err(|e| format!("Failed to create swapchain: {}", e))?;
-    println!("Swapchain created.");
 
-    // Create graphics pipeline using swapchain's render pass
     println!("Creating graphics pipeline...");
     let pipeline = GraphicsPipeline::new(
         &context,
@@ -94,40 +71,29 @@ fn main() -> Result<(), String> {
         &frag_shader,
         &layout,
         swapchain.render_pass(),
-        rust_and_vulkan::simple::Format::Bgra8Unorm, // matches swapchain format
+        rust_and_vulkan::simple::Format::Bgra8Unorm,
         None,
         None,
     )
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
-    println!("Graphics pipeline created.");
 
-    // Create double-buffering frame data (2 frames in flight)
-    println!("Creating frame data for double buffering...");
-    let frame_data = [
-        FrameData::create(&context).map_err(|e| format!("Failed to create frame data 0: {}", e))?,
-        FrameData::create(&context).map_err(|e| format!("Failed to create frame data 1: {}", e))?,
-    ];
-    println!("Frame data created (2 frames in flight).");
-
-    // For acquiring images from swapchain
-    let swapchain_image_count = swapchain.image_count() as usize;
-    println!("Swapchain has {} images", swapchain_image_count);
-
-    // Main loop
     let mut quit = false;
     let start_time = Instant::now();
     let mut last_print_time = start_time;
     let mut frame_count = 0;
-    let mut frame_index = 0; // Alternates between 0 and 1 for double buffering
 
     while !quit {
-        // Get current frame data (alternates between 0 and 1)
-        let current_frame = &frame_data[frame_index];
+        // Get swapchain properties (no borrow conflicts)
+        let extent = swapchain.extent();
+        let render_pass = swapchain.render_pass();
 
-        // Wait for this frame's GPU work to complete before reusing it
-        current_frame
-            .wait()
-            .map_err(|e| format!("Failed to wait for frame: {}", e))?;
+        // Begin frame and get the command buffer
+        swapchain
+            .begin_frame()
+            .map_err(|e| format!("Failed to begin frame: {}", e))?;
+
+        let cmd = swapchain.current_command_buffer();
+        let framebuffer = swapchain.framebuffer(swapchain.current_image_index());
 
         // Handle events
         unsafe {
@@ -135,22 +101,17 @@ fn main() -> Result<(), String> {
             while rust_and_vulkan::SDL_PollEvent(&mut event) {
                 let event_type = event.type_;
                 if event_type == rust_and_vulkan::SDL_EventType::SDL_EVENT_QUIT as u32 {
-                    println!("SDL_EVENT_QUIT received");
                     quit = true;
                 } else if event_type == rust_and_vulkan::SDL_EventType::SDL_EVENT_KEY_DOWN as u32 {
-                    // Check for ESC key
                     if event.key.key == rust_and_vulkan::SDLK_ESCAPE {
-                        println!("ESC key pressed");
                         quit = true;
                     }
                 }
             }
         }
 
-        // Update MVP matrix based on elapsed time
         let elapsed = start_time.elapsed().as_secs_f32();
 
-        // Create model matrix with rotation using GLM
         let mut model: Mat4 = mat4(
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
@@ -158,120 +119,54 @@ fn main() -> Result<(), String> {
         model = rotate(&model, elapsed * 0.7, vec3(0.0, 1.0, 0.0));
         model = rotate(&model, elapsed * 0.3, vec3(0.0, 0.0, 1.0));
 
-        // Create view matrix (camera) using GLM
-        let eye = vec3(0.0, 0.0, 3.0);
-        let center = vec3(0.0, 0.0, 0.0);
-        let up = vec3(0.0, 1.0, 0.0);
-        let view = look_at(eye, center, up);
+        let view = look_at(vec3(0.0, 0.0, 3.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+        let projection = perspective(800.0 / 600.0, PI / 3.0, 0.1, 100.0);
 
-        // Create projection matrix using GLM
-        let projection = perspective(
-            800.0 / 600.0, // aspect ratio
-            PI / 3.0,      // 60 degrees FOV
-            0.1,           // near
-            100.0,         // far
-        );
-
-        // MVP = projection * view * model
         let mvp = projection * view * model;
 
-        // Debug: Print MVP matrix on first frame
-        if frame_count == 0 && elapsed < 0.1 {
-            println!("\nMVP Matrix (first frame):");
-            for row in 0..4 {
-                println!(
-                    "  [{:.4}, {:.4}, {:.4}, {:.4}]",
-                    mvp.c0[row], mvp.c1[row], mvp.c2[row], mvp.c3[row]
-                );
-            }
-            println!();
-        }
-
-        // Prepare MVP matrix bytes for push constants
-        // GLM stores matrices in column-major order, so we can pack directly
-        let mut mvp_bytes = [0u8; 64]; // mat4 = 4x4 f32 = 64 bytes
+        let mut mvp_bytes = [0u8; 64];
         unsafe {
             let mvp_ptr = &mvp as *const Mat4 as *const u8;
             mvp_bytes.copy_from_slice(std::slice::from_raw_parts(mvp_ptr, 64));
         }
 
-        // Acquire next image (signals image_available_semaphore when ready)
-        let image_index = swapchain
-            .acquire_next_image(current_frame.image_available_semaphore)
-            .map_err(|e| format!("Failed to acquire next image: {}", e))?;
-
-        // Begin recording commands
-        current_frame
-            .command_buffer
-            .begin()
+        cmd.begin()
             .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
 
-        // Begin render pass
-        let framebuffer = swapchain.framebuffer(image_index);
-        let extent = swapchain.extent();
-        current_frame.command_buffer.begin_render_pass(
-            swapchain.render_pass(),
+        cmd.begin_render_pass(
+            render_pass,
             framebuffer,
             extent.width,
             extent.height,
-            [1.0, 0.0, 0.0, 1.0], // red clear color
+            [1.0, 0.0, 0.0, 1.0],
         );
 
-        // Bind graphics pipeline
-        current_frame.command_buffer.bind_pipeline(&pipeline);
+        cmd.bind_pipeline(&pipeline);
+        cmd.push_constants(&layout, &mvp_bytes);
+        cmd.draw(36, 1, 0, 0);
 
-        // Set MVP matrix via push constants (64 bytes = mat4)
-        current_frame
-            .command_buffer
-            .push_constants(&layout, &mvp_bytes);
-
-        // Draw cube (36 vertices = 12 triangles * 3 vertices)
-        current_frame.command_buffer.draw(36, 1, 0, 0);
-
-        // End render pass
-        current_frame.command_buffer.end_render_pass();
-
-        // End recording
-        current_frame
-            .command_buffer
-            .end()
+        cmd.end_render_pass();
+        cmd.end()
             .map_err(|e| format!("Failed to end command buffer: {}", e))?;
 
-        // Submit command buffer with proper semaphore synchronization
-        // image_available_semaphore waits for swapchain image to be ready
-        // render_finished_semaphore signals when rendering is done
-        current_frame
-            .submit(
-                &context,
-                &[current_frame.image_available_semaphore],
-                &[current_frame.render_finished_semaphore],
-            )
-            .map_err(|e| format!("Failed to submit command buffer: {}", e))?;
-
-        // Present image
         swapchain
-            .present(image_index, current_frame.render_finished_semaphore)
-            .map_err(|e| format!("Failed to present: {}", e))?;
+            .end_frame(&context)
+            .map_err(|e| format!("Failed to end frame: {}", e))?;
 
-        // Print FPS every second
         frame_count += 1;
         let now = Instant::now();
         if now.duration_since(last_print_time).as_secs_f32() >= 1.0 {
             let fps = frame_count as f32 / now.duration_since(last_print_time).as_secs_f32();
-            println!("FPS: {:.1}, Rotation time: {:.1}s", fps, elapsed);
+            println!("FPS: {:.1}", fps);
             last_print_time = now;
             frame_count = 0;
         }
-
-        // Alternate to next frame (0 -> 1, 1 -> 0)
-        frame_index = 1 - frame_index;
     }
 
-    // Wait for GPU to finish all operations before cleanup
     context
         .wait_idle()
         .map_err(|e| format!("Failed to wait for device idle: {}", e))?;
 
-    println!("Spinning cube example completed successfully.");
+    println!("Done.");
     Ok(())
 }

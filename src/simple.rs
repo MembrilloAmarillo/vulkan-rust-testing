@@ -2350,6 +2350,20 @@ impl CommandBuffer {
         }
     }
 
+    /// Reset the command buffer to initial state (must be called between uses)
+    pub fn reset(&self) -> Result<()> {
+        unsafe {
+            let result = crate::vkResetCommandBuffer(self.buffer, 0);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to reset command buffer: {:?}",
+                    result
+                )));
+            }
+            Ok(())
+        }
+    }
+
     /// Copy data between GPU buffers
     pub fn copy_buffer(&self, src: &GpuAllocation, dst: &GpuAllocation, size: usize) -> Result<()> {
         unsafe {
@@ -2949,6 +2963,10 @@ pub struct Swapchain {
     #[allow(dead_code)]
     graphics_queue: crate::VkQueue,
     present_queue: crate::VkQueue,
+    // Internal double buffering (2 frames in flight)
+    frame_data: Vec<FrameData>,
+    current_frame_index: usize,
+    current_image_index: u32,
 }
 
 impl Swapchain {
@@ -3499,6 +3517,9 @@ impl Swapchain {
                 framebuffers.push(framebuffer);
             }
 
+            // Create double-buffering frame data (2 frames in flight)
+            let frame_data = vec![FrameData::create(context)?, FrameData::create(context)?];
+
             Ok(Swapchain {
                 swapchain,
                 images,
@@ -3514,6 +3535,9 @@ impl Swapchain {
                 device: context.device,
                 graphics_queue: context._graphics_queue,
                 present_queue: context._present_queue,
+                frame_data,
+                current_frame_index: 0,
+                current_image_index: 0,
             })
         }
     }
@@ -3589,6 +3613,63 @@ impl Swapchain {
     /// Get the number of images in the swapchain
     pub fn image_count(&self) -> u32 {
         self.images.len() as u32
+    }
+
+    /// Get the index of the currently acquired swapchain image
+    pub fn current_image_index(&self) -> u32 {
+        self.current_image_index
+    }
+
+    /// Get the command buffer for the current frame
+    pub fn current_command_buffer(&self) -> &CommandBuffer {
+        &self.frame_data[self.current_frame_index].command_buffer
+    }
+
+    /// Begin a new frame for rendering with automatic frame synchronization
+    /// This method:
+    /// - Waits for the previous GPU work on this frame to complete
+    /// - Acquires the next swapchain image
+    /// - Resets the command buffer for reuse
+    /// - Returns Ok if successful
+    pub fn begin_frame(&mut self) -> Result<()> {
+        let current_frame = &self.frame_data[self.current_frame_index];
+
+        // Wait for this frame's GPU work to complete before reusing it
+        current_frame.wait()?;
+
+        // Acquire next image from swapchain
+        self.current_image_index =
+            self.acquire_next_image(current_frame.image_available_semaphore)?;
+
+        // Reset command buffer for reuse
+        current_frame.command_buffer.reset()?;
+
+        Ok(())
+    }
+
+    /// End the current frame and submit rendering to the GPU
+    /// This method:
+    /// - Submits the command buffer
+    /// - Presents the rendered image to the screen
+    /// - Advances to the next frame in the double-buffering rotation
+    pub fn end_frame(&mut self, context: &GraphicsContext) -> Result<()> {
+        let current_frame = &self.frame_data[self.current_frame_index];
+        let image_index = self.current_image_index;
+
+        // Submit command buffer with semaphore synchronization
+        current_frame.submit(
+            context,
+            &[current_frame.image_available_semaphore],
+            &[current_frame.render_finished_semaphore],
+        )?;
+
+        // Present the image to the screen
+        self.present(image_index, current_frame.render_finished_semaphore)?;
+
+        // Advance to next frame (0 -> 1, 1 -> 0)
+        self.current_frame_index = 1 - self.current_frame_index;
+
+        Ok(())
     }
 }
 
