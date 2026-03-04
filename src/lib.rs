@@ -415,52 +415,25 @@ impl VulkanDevice {
             if surface.is_some() {
                 enabled_extensions.push(b"VK_KHR_swapchain\0".as_ptr() as *const i8);
             }
-            // Enable buffer device address extension for GPU pointers
-            enabled_extensions.push(b"VK_KHR_buffer_device_address\0".as_ptr() as *const i8);
-            // Enable descriptor buffer extension for bindless textures
-            enabled_extensions.push(b"VK_EXT_descriptor_buffer\0".as_ptr() as *const i8);
-            // Enable scalar block layout for GLSL scalar layout
-            enabled_extensions.push(b"VK_EXT_scalar_block_layout\0".as_ptr() as *const i8);
-            // Enable buffer reference for GLSL buffer_reference extension (optional)
-            // enabled_extensions.push(b"VK_EXT_buffer_reference\0".as_ptr() as *const i8);
+            // Buffer device address is part of Vulkan 1.2+ core
+            // (no longer need this extension for newer drivers)
             eprintln!("Enabled device extensions:");
             for ext in &enabled_extensions {
                 eprintln!("  {:?}", std::ffi::CStr::from_ptr(*ext)); // unsafe but we know they are zero-terminated
             }
 
-            // Scalar block layout feature
-            let mut scalar_block_layout_features = crate::VkPhysicalDeviceScalarBlockLayoutFeatures {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT,
-                pNext: std::ptr::null_mut(),
-                scalarBlockLayout: 1,
-            };
-
-            // Descriptor buffer feature (must be before buffer device address in chain)
-            let mut descriptor_buffer_features = crate::VkPhysicalDeviceDescriptorBufferFeaturesEXT {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
-                pNext: std::ptr::null_mut(),
-                descriptorBuffer: 1,
-                descriptorBufferCaptureReplay: 0,
-                descriptorBufferImageLayoutIgnored: 0,
-                descriptorBufferPushDescriptors: 0,
-            };
-
             // Buffer device address feature
             let mut buffer_device_address_features = crate::VkPhysicalDeviceBufferDeviceAddressFeatures {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
-                pNext: &mut descriptor_buffer_features as *mut _ as *mut libc::c_void,
-                bufferDeviceAddress: 1,
-                bufferDeviceAddressCaptureReplay: 0,
-                bufferDeviceAddressMultiDevice: 0,
-            };
-
-            // Chain scalar -> buffer device address -> descriptor buffer
-            scalar_block_layout_features.pNext =
-                &mut buffer_device_address_features as *mut _ as *mut libc::c_void;
+                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+                 pNext: std::ptr::null_mut(),
+                 bufferDeviceAddress: 1,
+                 bufferDeviceAddressCaptureReplay: 0,
+                 bufferDeviceAddressMultiDevice: 0,
+             };
 
             let device_create_info = crate::VkDeviceCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                pNext: &mut scalar_block_layout_features as *mut _ as *mut libc::c_void,
+                pNext: &mut buffer_device_address_features as *mut _ as *mut libc::c_void,
                 flags: 0,
                 queueCreateInfoCount: queue_create_infos.len() as u32,
                 pQueueCreateInfos: queue_create_infos.as_ptr(),

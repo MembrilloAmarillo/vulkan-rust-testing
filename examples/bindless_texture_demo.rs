@@ -126,7 +126,7 @@ fn main() -> Result<(), String> {
 
     // Test 7: Bind texture heap to command buffer
     println!("8. Binding texture heap to command buffer...");
-    cmd.bind_texture_heap(&texture_heap);
+    cmd.bind_texture_heap(&texture_heap, &pipeline_layout, 0);
     println!("   Texture heap bound (conceptual - actual implementation pending).");
     println!();
 

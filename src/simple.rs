@@ -646,6 +646,7 @@ impl Fence {
                     "Failed to get fence status: {:?}",
                     result
                 ))),
+            }
         }
     }
 }
@@ -1267,6 +1268,7 @@ impl RootArguments {
 pub struct PipelineLayout {
     layout: crate::VkPipelineLayout,
     device: crate::VkDevice,
+    #[allow(dead_code)]
     set_layouts: Vec<crate::VkDescriptorSetLayout>,
     push_constant_range: Option<crate::VkPushConstantRange>,
 }
@@ -2482,19 +2484,16 @@ impl CommandBuffer {
         self.bind_compute_pipeline(pipeline);
         // Pass 64-bit pointer as two 32-bit integers
         let data = [
-            root_ptr as u32,        // low 32 bits
-            (root_ptr >> 32) as u32 // high 32 bits
+            root_ptr as u32,         // low 32 bits
+            (root_ptr >> 32) as u32, // high 32 bits
         ];
-        self.push_constants(layout, unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                std::mem::size_of_val(&data)
-            )
-        });
+        let data_bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data))
+        };
+        self.push_constants(layout, data_bytes);
         unsafe {
             crate::vkCmdDispatch(self.buffer, group_count[0], group_count[1], group_count[2]);
         }
-    }
     }
 
     /// Draw triangles
@@ -2543,17 +2542,14 @@ impl CommandBuffer {
         if layout.push_constant_size() >= 8 {
             let addr = root_args.gpu_address();
             let data = [
-                addr as u32,        // low 32 bits
-                (addr >> 32) as u32 // high 32 bits
+                addr as u32,         // low 32 bits
+                (addr >> 32) as u32, // high 32 bits
             ];
-            self.push_constants(layout, unsafe {
-                std::slice::from_raw_parts(
-                    data.as_ptr() as *const u8,
-                    std::mem::size_of_val(&data)
-                )
-            });
+            let data_bytes = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data))
+            };
+            self.push_constants(layout, data_bytes);
         }
-    }
     }
 
     /// Set root arguments for graphics pipeline
@@ -2562,17 +2558,14 @@ impl CommandBuffer {
         if layout.push_constant_size() >= 8 {
             let addr = root_args.gpu_address();
             let data = [
-                addr as u32,        // low 32 bits
-                (addr >> 32) as u32 // high 32 bits
+                addr as u32,         // low 32 bits
+                (addr >> 32) as u32, // high 32 bits
             ];
-            self.push_constants(layout, unsafe {
-                std::slice::from_raw_parts(
-                    data.as_ptr() as *const u8,
-                    std::mem::size_of_val(&data)
-                )
-            });
+            let data_bytes = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data))
+            };
+            self.push_constants(layout, data_bytes);
         }
-    }
     }
 
     /// Get the Vulkan command buffer handle
@@ -2585,6 +2578,7 @@ impl CommandBuffer {
 pub struct DescriptorHeap {
     buffer: GpuAllocation,
     descriptor_size: usize,
+    #[allow(dead_code)]
     descriptor_alignment: usize,
     count: usize,
     capacity: usize,
@@ -2737,6 +2731,7 @@ impl DescriptorHeap {
 /// Swapchain for presentation
 pub struct Swapchain {
     swapchain: crate::VkSwapchainKHR,
+    #[allow(dead_code)]
     images: Vec<crate::VkImage>,
     image_views: Vec<crate::VkImageView>,
     render_pass: crate::VkRenderPass,
@@ -2744,6 +2739,7 @@ pub struct Swapchain {
     format: crate::VkFormat,
     extent: crate::VkExtent2D,
     device: crate::VkDevice,
+    #[allow(dead_code)]
     graphics_queue: crate::VkQueue,
     present_queue: crate::VkQueue,
 }
