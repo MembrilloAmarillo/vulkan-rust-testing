@@ -694,6 +694,32 @@ pub struct Fence {
 }
 
 impl Fence {
+    /// Create a new fence (initially signaled for first frame)
+    pub fn create(context: &GraphicsContext) -> Result<Self> {
+        unsafe {
+            let fence_info = crate::VkFenceCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                pNext: std::ptr::null(),
+                flags: crate::VkFenceCreateFlagBits::VK_FENCE_CREATE_SIGNALED_BIT as u32,
+            };
+
+            let mut fence = std::ptr::null_mut();
+            let result =
+                crate::vkCreateFence(context.device, &fence_info, std::ptr::null(), &mut fence);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create fence: {:?}",
+                    result
+                )));
+            }
+
+            Ok(Fence {
+                fence,
+                device: context.device,
+            })
+        }
+    }
+
     /// Wait for the fence to be signaled (with timeout in nanoseconds)
     pub fn wait(&self, timeout_ns: u64) -> Result<()> {
         unsafe {
@@ -725,6 +751,20 @@ impl Fence {
                     result
                 ))),
             }
+        }
+    }
+
+    /// Reset the fence to unsignaled state (must be in signaled state)
+    pub fn reset(&self, context: &GraphicsContext) -> Result<()> {
+        unsafe {
+            let result = crate::vkResetFences(context.device, 1, &self.fence);
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to reset fence: {:?}",
+                    result
+                )));
+            }
+            Ok(())
         }
     }
 }
@@ -3585,5 +3625,50 @@ impl Drop for DescriptorHeap {
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
         // Command buffers are freed when the pool is destroyed
+    }
+}
+
+/// Data for a single frame in flight (supports multiple frames being rendered simultaneously)
+pub struct FrameData {
+    pub command_buffer: CommandBuffer,
+    pub fence: Fence,
+    pub image_available_semaphore: crate::VkSemaphore,
+    pub render_finished_semaphore: crate::VkSemaphore,
+}
+
+impl FrameData {
+    /// Create a new frame data for double buffering (2 frames in flight)
+    pub fn create(context: &GraphicsContext) -> Result<Self> {
+        Ok(FrameData {
+            command_buffer: CommandBuffer::allocate(context)?,
+            fence: Fence::create(context)?,
+            image_available_semaphore: context.create_semaphore()?,
+            render_finished_semaphore: context.create_semaphore()?,
+        })
+    }
+
+    /// Wait for this frame's GPU work to complete
+    pub fn wait(&self) -> Result<()> {
+        self.fence.wait_forever()
+    }
+
+    /// Reset the fence for the next frame
+    pub fn reset_fence(&self, context: &GraphicsContext) -> Result<()> {
+        self.fence.reset(context)
+    }
+
+    /// Submit this frame's command buffer with semaphore synchronization
+    pub fn submit(
+        &self,
+        context: &GraphicsContext,
+        wait_semaphores: &[crate::VkSemaphore],
+        signal_semaphores: &[crate::VkSemaphore],
+    ) -> Result<()> {
+        let fence = context.submit_with_semaphores(
+            &self.command_buffer,
+            wait_semaphores,
+            signal_semaphores,
+        )?;
+        fence.wait_forever()
     }
 }

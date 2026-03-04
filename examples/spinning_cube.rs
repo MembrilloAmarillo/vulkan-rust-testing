@@ -1,11 +1,12 @@
 //! 3D spinning cube example using the simple graphics API with GLM math.
 //! Demonstrates 3D transformations with model-view-projection matrix.
+//! Uses double buffering (2 frames in flight) for efficient GPU pipelining.
 //! Press ESC to exit.
 
 use glm::ext::{look_at, perspective, rotate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
-    CommandBuffer, GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
+    FrameData, GraphicsPipeline, PipelineLayout, ShaderModule, Swapchain,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
@@ -100,36 +101,34 @@ fn main() -> Result<(), String> {
     .map_err(|e| format!("Failed to create graphics pipeline: {}", e))?;
     println!("Graphics pipeline created.");
 
-    // Allocate command buffer
-    println!("Allocating command buffer...");
-    let cmd = CommandBuffer::allocate(&context)
-        .map_err(|e| format!("Failed to allocate command buffer: {}", e))?;
+    // Create double-buffering frame data (2 frames in flight)
+    println!("Creating frame data for double buffering...");
+    let frame_data = [
+        FrameData::create(&context).map_err(|e| format!("Failed to create frame data 0: {}", e))?,
+        FrameData::create(&context).map_err(|e| format!("Failed to create frame data 1: {}", e))?,
+    ];
+    println!("Frame data created (2 frames in flight).");
 
-    // Create semaphores for image acquisition (one per swapchain image to avoid conflicts)
+    // For acquiring images from swapchain
     let swapchain_image_count = swapchain.image_count() as usize;
-    let mut image_available_semaphores = Vec::new();
-    let mut render_finished_semaphores = Vec::new();
-
-    for _ in 0..swapchain_image_count {
-        image_available_semaphores.push(
-            context
-                .create_semaphore()
-                .map_err(|e| format!("Failed to create semaphore: {}", e))?,
-        );
-        render_finished_semaphores.push(
-            context
-                .create_semaphore()
-                .map_err(|e| format!("Failed to create semaphore: {}", e))?,
-        );
-    }
+    println!("Swapchain has {} images", swapchain_image_count);
 
     // Main loop
     let mut quit = false;
     let start_time = Instant::now();
     let mut last_print_time = start_time;
     let mut frame_count = 0;
+    let mut frame_index = 0; // Alternates between 0 and 1 for double buffering
 
     while !quit {
+        // Get current frame data (alternates between 0 and 1)
+        let current_frame = &frame_data[frame_index];
+
+        // Wait for this frame's GPU work to complete before reusing it
+        current_frame
+            .wait()
+            .map_err(|e| format!("Failed to wait for frame: {}", e))?;
+
         // Handle events
         unsafe {
             let mut event = std::mem::zeroed();
@@ -198,17 +197,19 @@ fn main() -> Result<(), String> {
 
         // Acquire next image (signals image_available_semaphore when ready)
         let image_index = swapchain
-            .acquire_next_image(image_available_semaphores[0])
+            .acquire_next_image(current_frame.image_available_semaphore)
             .map_err(|e| format!("Failed to acquire next image: {}", e))?;
 
         // Begin recording commands
-        cmd.begin()
+        current_frame
+            .command_buffer
+            .begin()
             .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
 
         // Begin render pass
         let framebuffer = swapchain.framebuffer(image_index);
         let extent = swapchain.extent();
-        cmd.begin_render_pass(
+        current_frame.command_buffer.begin_render_pass(
             swapchain.render_pass(),
             framebuffer,
             extent.width,
@@ -217,40 +218,39 @@ fn main() -> Result<(), String> {
         );
 
         // Bind graphics pipeline
-        cmd.bind_pipeline(&pipeline);
+        current_frame.command_buffer.bind_pipeline(&pipeline);
 
         // Set MVP matrix via push constants (64 bytes = mat4)
-        cmd.push_constants(&layout, &mvp_bytes);
+        current_frame
+            .command_buffer
+            .push_constants(&layout, &mvp_bytes);
 
         // Draw cube (36 vertices = 12 triangles * 3 vertices)
-        cmd.draw(36, 1, 0, 0);
+        current_frame.command_buffer.draw(36, 1, 0, 0);
 
         // End render pass
-        cmd.end_render_pass();
+        current_frame.command_buffer.end_render_pass();
 
         // End recording
-        cmd.end()
+        current_frame
+            .command_buffer
+            .end()
             .map_err(|e| format!("Failed to end command buffer: {}", e))?;
 
         // Submit command buffer with proper semaphore synchronization
-        // Use semaphores indexed by image_index to avoid conflicts
-        let fence = context
-            .submit_with_semaphores(
-                &cmd,
-                &[image_available_semaphores[0]],
-                &[render_finished_semaphores[image_index as usize]],
+        // image_available_semaphore waits for swapchain image to be ready
+        // render_finished_semaphore signals when rendering is done
+        current_frame
+            .submit(
+                &context,
+                &[current_frame.image_available_semaphore],
+                &[current_frame.render_finished_semaphore],
             )
             .map_err(|e| format!("Failed to submit command buffer: {}", e))?;
-        fence
-            .wait_forever()
-            .map_err(|e| format!("Failed to wait for fence: {}", e))?;
 
         // Present image
         swapchain
-            .present(
-                image_index,
-                render_finished_semaphores[image_index as usize],
-            )
+            .present(image_index, current_frame.render_finished_semaphore)
             .map_err(|e| format!("Failed to present: {}", e))?;
 
         // Print FPS every second
@@ -262,20 +262,15 @@ fn main() -> Result<(), String> {
             last_print_time = now;
             frame_count = 0;
         }
+
+        // Alternate to next frame (0 -> 1, 1 -> 0)
+        frame_index = 1 - frame_index;
     }
 
     // Wait for GPU to finish all operations before cleanup
     context
         .wait_idle()
         .map_err(|e| format!("Failed to wait for device idle: {}", e))?;
-
-    // Cleanup semaphores
-    for sem in image_available_semaphores {
-        context.destroy_semaphore(sem);
-    }
-    for sem in render_finished_semaphores {
-        context.destroy_semaphore(sem);
-    }
 
     println!("Spinning cube example completed successfully.");
     Ok(())
