@@ -593,6 +593,18 @@ impl GraphicsContext {
 
     /// Submit a command buffer to the graphics queue and return a fence
     pub fn submit(&self, command_buffer: &CommandBuffer) -> Result<Fence> {
+        self.submit_with_semaphores(command_buffer, &[], &[])
+    }
+
+    /// Submit command buffer with optional wait and signal semaphores
+    /// wait_semaphores: semaphores to wait on before execution
+    /// signal_semaphores: semaphores to signal after execution completes
+    pub fn submit_with_semaphores(
+        &self,
+        command_buffer: &CommandBuffer,
+        wait_semaphores: &[crate::VkSemaphore],
+        signal_semaphores: &[crate::VkSemaphore],
+    ) -> Result<Fence> {
         use std::ptr;
 
         unsafe {
@@ -611,16 +623,37 @@ impl GraphicsContext {
                 )));
             }
 
+            // Create wait stage masks (all graphics)
+            let wait_stages: Vec<u32> = wait_semaphores
+                .iter()
+                .map(|_| {
+                    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        as u32
+                })
+                .collect();
+
             let submit_info = crate::VkSubmitInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 pNext: ptr::null(),
-                waitSemaphoreCount: 0,
-                pWaitSemaphores: ptr::null(),
-                pWaitDstStageMask: ptr::null(),
+                waitSemaphoreCount: wait_semaphores.len() as u32,
+                pWaitSemaphores: if wait_semaphores.is_empty() {
+                    ptr::null()
+                } else {
+                    wait_semaphores.as_ptr()
+                },
+                pWaitDstStageMask: if wait_stages.is_empty() {
+                    ptr::null()
+                } else {
+                    wait_stages.as_ptr()
+                },
                 commandBufferCount: 1,
                 pCommandBuffers: &command_buffer.vk_buffer(),
-                signalSemaphoreCount: 0,
-                pSignalSemaphores: ptr::null(),
+                signalSemaphoreCount: signal_semaphores.len() as u32,
+                pSignalSemaphores: if signal_semaphores.is_empty() {
+                    ptr::null()
+                } else {
+                    signal_semaphores.as_ptr()
+                },
             };
 
             let result = crate::vkQueueSubmit(self._graphics_queue, 1, &submit_info, fence);
@@ -1570,6 +1603,65 @@ impl PipelineLayout {
         self.push_constant_range
             .map(|range| range.size as usize)
             .unwrap_or(0)
+    }
+
+    /// Create a pipeline layout with flexible push constant size for specified shader stages
+    /// This is useful for passing data larger than a pointer (e.g., mat4 = 64 bytes, vec4 = 16 bytes)
+    pub fn with_push_constants_size(
+        context: &GraphicsContext,
+        stage_flags: u32,
+        size: u32,
+    ) -> Result<Self> {
+        use std::ptr;
+
+        unsafe {
+            let push_constant_range = crate::VkPushConstantRange {
+                stageFlags: stage_flags,
+                offset: 0,
+                size,
+            };
+
+            let create_info = crate::VkPipelineLayoutCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                setLayoutCount: 0,
+                pSetLayouts: ptr::null(),
+                pushConstantRangeCount: 1,
+                pPushConstantRanges: &push_constant_range,
+            };
+
+            let mut layout = std::ptr::null_mut();
+            let result = crate::vkCreatePipelineLayout(
+                context.device,
+                &create_info,
+                ptr::null(),
+                &mut layout,
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create pipeline layout with push constants: {:?}",
+                    result
+                )));
+            }
+
+            Ok(PipelineLayout {
+                layout,
+                device: context.device,
+                set_layouts: Vec::new(),
+                push_constant_range: Some(push_constant_range),
+            })
+        }
+    }
+
+    /// Create a pipeline layout with 64-byte push constants (for mat4 matrices)
+    pub fn with_mat4_push_constants(context: &GraphicsContext, stage_flags: u32) -> Result<Self> {
+        Self::with_push_constants_size(context, stage_flags, 64)
+    }
+
+    /// Create a pipeline layout with 16-byte push constants (for vec4 colors or 2x f64)
+    pub fn with_vec4_push_constants(context: &GraphicsContext, stage_flags: u32) -> Result<Self> {
+        Self::with_push_constants_size(context, stage_flags, 16)
     }
 }
 
@@ -3199,6 +3291,11 @@ impl Swapchain {
     /// Get framebuffer for given image index
     pub fn framebuffer(&self, image_index: u32) -> crate::VkFramebuffer {
         self.framebuffers[image_index as usize]
+    }
+
+    /// Get the number of images in the swapchain
+    pub fn image_count(&self) -> u32 {
+        self.images.len() as u32
     }
 }
 

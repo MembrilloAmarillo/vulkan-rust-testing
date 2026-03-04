@@ -81,9 +81,9 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("Failed to create fragment shader: {}", e))?;
     println!("Shader modules created.");
 
-    // Create pipeline layout with push constants for root pointer (graphics stages)
+    // Create pipeline layout with push constants for color (graphics stages)
     println!("Creating pipeline layout...");
-    let layout = PipelineLayout::with_root_argument(
+    let layout = PipelineLayout::with_vec4_push_constants(
         &context,
         rust_and_vulkan::simple::SHADER_STAGE_VERTEX
             | rust_and_vulkan::simple::SHADER_STAGE_FRAGMENT,
@@ -117,10 +117,23 @@ fn main() -> Result<(), String> {
     let cmd = CommandBuffer::allocate(&context)
         .map_err(|e| format!("Failed to allocate command buffer: {}", e))?;
 
-    // Create semaphore for image acquisition
-    let acquire_semaphore = context
-        .create_semaphore()
-        .map_err(|e| format!("Failed to create semaphore: {}", e))?;
+    // Create semaphores for image acquisition (one per swapchain image to avoid conflicts)
+    let swapchain_image_count = swapchain.image_count() as usize;
+    let mut image_available_semaphores = Vec::new();
+    let mut render_finished_semaphores = Vec::new();
+
+    for _ in 0..swapchain_image_count {
+        image_available_semaphores.push(
+            context
+                .create_semaphore()
+                .map_err(|e| format!("Failed to create semaphore: {}", e))?,
+        );
+        render_finished_semaphores.push(
+            context
+                .create_semaphore()
+                .map_err(|e| format!("Failed to create semaphore: {}", e))?,
+        );
+    }
 
     // Main loop
     let mut quit = false;
@@ -159,9 +172,9 @@ fn main() -> Result<(), String> {
             color_bytes[i * 4..(i + 1) * 4].copy_from_slice(&bytes);
         }
 
-        // Acquire next image
+        // Acquire next image (signals image_available_semaphore when ready)
         let image_index = swapchain
-            .acquire_next_image(acquire_semaphore)
+            .acquire_next_image(image_available_semaphores[0])
             .map_err(|e| format!("Failed to acquire next image: {}", e))?;
 
         // Begin recording commands
@@ -195,9 +208,14 @@ fn main() -> Result<(), String> {
         cmd.end()
             .map_err(|e| format!("Failed to end command buffer: {}", e))?;
 
-        // Submit command buffer and wait for fence (synchronization simplified)
+        // Submit command buffer with proper semaphore synchronization
+        // Use semaphores indexed by image_index to avoid conflicts
         let fence = context
-            .submit(&cmd)
+            .submit_with_semaphores(
+                &cmd,
+                &[image_available_semaphores[0]],
+                &[render_finished_semaphores[image_index as usize]],
+            )
             .map_err(|e| format!("Failed to submit command buffer: {}", e))?;
         fence
             .wait_forever()
@@ -205,7 +223,10 @@ fn main() -> Result<(), String> {
 
         // Present image
         swapchain
-            .present(image_index, acquire_semaphore)
+            .present(
+                image_index,
+                render_finished_semaphores[image_index as usize],
+            )
             .map_err(|e| format!("Failed to present: {}", e))?;
 
         // Print FPS every second
@@ -224,8 +245,13 @@ fn main() -> Result<(), String> {
         println!("Test completed after {} frames.", frames_rendered);
     }
 
-    // Cleanup semaphore
-    context.destroy_semaphore(acquire_semaphore);
+    // Cleanup semaphores
+    for sem in image_available_semaphores {
+        context.destroy_semaphore(sem);
+    }
+    for sem in render_finished_semaphores {
+        context.destroy_semaphore(sem);
+    }
 
     println!("Graphics test completed successfully.");
     Ok(())
