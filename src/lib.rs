@@ -422,18 +422,21 @@ impl VulkanDevice {
                 eprintln!("  {:?}", std::ffi::CStr::from_ptr(*ext)); // unsafe but we know they are zero-terminated
             }
 
-            // Buffer device address feature
-            let mut buffer_device_address_features = crate::VkPhysicalDeviceBufferDeviceAddressFeatures {
-                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
-                 pNext: std::ptr::null_mut(),
-                 bufferDeviceAddress: 1,
-                 bufferDeviceAddressCaptureReplay: 0,
-                 bufferDeviceAddressMultiDevice: 0,
-             };
+            // Core feature toggles
+            let mut enabled_features: crate::VkPhysicalDeviceFeatures = std::mem::zeroed();
+            enabled_features.shaderInt64 = 1;
+
+            // Vulkan 1.2 feature chain
+            let mut vulkan12_features: crate::VkPhysicalDeviceVulkan12Features = std::mem::zeroed();
+            vulkan12_features.sType =
+                crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+            vulkan12_features.pNext = std::ptr::null_mut();
+            vulkan12_features.bufferDeviceAddress = 1;
+            vulkan12_features.scalarBlockLayout = 1;
 
             let device_create_info = crate::VkDeviceCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                pNext: &mut buffer_device_address_features as *mut _ as *mut libc::c_void,
+                pNext: &mut vulkan12_features as *mut _ as *mut libc::c_void,
                 flags: 0,
                 queueCreateInfoCount: queue_create_infos.len() as u32,
                 pQueueCreateInfos: queue_create_infos.as_ptr(),
@@ -445,7 +448,7 @@ impl VulkanDevice {
                 } else {
                     enabled_extensions.as_ptr()
                 },
-                pEnabledFeatures: std::ptr::null(),
+                pEnabledFeatures: &enabled_features,
             };
 
             eprintln!("Calling vkCreateDevice...");

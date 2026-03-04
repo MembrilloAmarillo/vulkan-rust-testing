@@ -9,8 +9,8 @@
 use glm::ext::{look_at, perspective, rotate, scale, translate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
-    Buffer, CommandBuffer, ComputePipeline, Format, GraphicsPipeline, HazardFlags, IndexType,
-    MemoryType, PipelineLayout, RootArguments, ShaderModule, Swapchain, Texture,
+    Buffer, CommandBuffer, ComputePipeline, Error, Format, GraphicsPipeline, HazardFlags,
+    IndexType, MemoryType, PipelineLayout, RootArguments, ShaderModule, Swapchain, Texture,
     TextureDescriptorHeap, TextureUsage, STAGE_COMPUTE, STAGE_TRANSFER,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
@@ -335,6 +335,7 @@ fn main() -> Result<(), String> {
     let texture_size = 256u32;
     let mut textures = Vec::new();
     let mut texture_indices = Vec::new();
+    let mut bindless_supported = true;
 
     for mode in 0..3u32 {
         let noise_pixels = generate_noise_texture_data(
@@ -354,9 +355,15 @@ fn main() -> Result<(), String> {
             .allocate()
             .map_err(|e| format!("Failed allocating texture descriptor: {}", e))?;
 
-        texture_heap
-            .write_descriptor(&context, descriptor_index, &texture, sampler)
-            .map_err(|e| format!("Failed writing texture descriptor: {}", e))?;
+        match texture_heap.write_descriptor(&context, descriptor_index, &texture, sampler) {
+            Ok(()) => {}
+            Err(Error::Unsupported) => {
+                bindless_supported = false;
+            }
+            Err(e) => {
+                return Err(format!("Failed writing texture descriptor: {}", e));
+            }
+        }
 
         textures.push(texture);
         texture_indices.push(descriptor_index);
@@ -366,6 +373,11 @@ fn main() -> Result<(), String> {
         "Generated {} compute textures and wrote them to the bindless descriptor heap.",
         texture_indices.len()
     );
+    if !bindless_supported {
+        println!(
+            "Descriptor buffer extension unavailable on this driver; running with procedural shading fallback."
+        );
+    }
 
     // Build meshes
     let (cube_vertices, cube_indices) = make_cube_mesh();
@@ -486,7 +498,9 @@ fn main() -> Result<(), String> {
 
         // 3D pipeline pass: cube + sphere
         cmd.bind_pipeline(&pipeline_3d);
-        cmd.bind_texture_heap_graphics(&texture_heap, &layout_3d, 0);
+        if bindless_supported {
+            cmd.bind_texture_heap_graphics(&texture_heap, &layout_3d, 0);
+        }
 
         let mut cube_model = identity();
         cube_model = translate(&cube_model, vec3(-1.0, 0.0, 0.0));
