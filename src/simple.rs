@@ -45,6 +45,88 @@
 
 use std::ptr;
 
+unsafe fn load_device_fn(
+    device: crate::VkDevice,
+    name: &'static [u8],
+) -> Option<unsafe extern "C" fn()> {
+    debug_assert!(name.last() == Some(&0));
+    std::mem::transmute(crate::vkGetDeviceProcAddr(
+        device,
+        name.as_ptr() as *const i8,
+    ))
+}
+
+unsafe fn vk_get_descriptor_ext_dynamic(
+    device: crate::VkDevice,
+    descriptor_info: *const crate::VkDescriptorGetInfoEXT,
+    descriptor_size: usize,
+    descriptor: *mut std::ffi::c_void,
+) -> bool {
+    let Some(func) = load_device_fn(device, b"vkGetDescriptorEXT\0") else {
+        return false;
+    };
+    let f: unsafe extern "C" fn(
+        crate::VkDevice,
+        *const crate::VkDescriptorGetInfoEXT,
+        usize,
+        *mut std::ffi::c_void,
+    ) = std::mem::transmute(func);
+    f(device, descriptor_info, descriptor_size, descriptor);
+    true
+}
+
+unsafe fn vk_cmd_bind_descriptor_buffers_ext_dynamic(
+    device: crate::VkDevice,
+    command_buffer: crate::VkCommandBuffer,
+    binding_info_count: u32,
+    binding_infos: *const crate::VkDescriptorBufferBindingInfoEXT,
+) -> bool {
+    let Some(func) = load_device_fn(device, b"vkCmdBindDescriptorBuffersEXT\0") else {
+        return false;
+    };
+    let f: unsafe extern "C" fn(
+        crate::VkCommandBuffer,
+        u32,
+        *const crate::VkDescriptorBufferBindingInfoEXT,
+    ) = std::mem::transmute(func);
+    f(command_buffer, binding_info_count, binding_infos);
+    true
+}
+
+unsafe fn vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
+    device: crate::VkDevice,
+    command_buffer: crate::VkCommandBuffer,
+    pipeline_bind_point: crate::VkPipelineBindPoint,
+    layout: crate::VkPipelineLayout,
+    first_set: u32,
+    set_count: u32,
+    buffer_indices: *const u32,
+    offsets: *const u64,
+) -> bool {
+    let Some(func) = load_device_fn(device, b"vkCmdSetDescriptorBufferOffsetsEXT\0") else {
+        return false;
+    };
+    let f: unsafe extern "C" fn(
+        crate::VkCommandBuffer,
+        crate::VkPipelineBindPoint,
+        crate::VkPipelineLayout,
+        u32,
+        u32,
+        *const u32,
+        *const u64,
+    ) = std::mem::transmute(func);
+    f(
+        command_buffer,
+        pipeline_bind_point,
+        layout,
+        first_set,
+        set_count,
+        buffer_indices,
+        offsets,
+    );
+    true
+}
+
 // Pipeline stage constants for barriers
 pub const STAGE_TRANSFER: u32 =
     crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TRANSFER_BIT as u32;
@@ -2146,13 +2228,16 @@ impl TextureDescriptorHeap {
             let offset = index as usize * self.descriptor_size;
             let dest_ptr = self.allocation.cpu_ptr.add(offset) as *mut std::ffi::c_void;
 
-            // Use vkGetDescriptorEXT to encode the descriptor
-            crate::vkGetDescriptorEXT(
+            // Use vkGetDescriptorEXT to encode the descriptor (loaded dynamically)
+            if !vk_get_descriptor_ext_dynamic(
                 context.device,
                 &descriptor_info,
                 self.descriptor_size,
                 dest_ptr,
-            );
+            ) {
+                crate::vkDestroyImageView(context.device, image_view, ptr::null());
+                return Err(Error::Unsupported);
+            }
 
             println!(
                 "✓ Texture descriptor written at index {} (offset: 0x{:x}, size: {} bytes)",
@@ -3030,7 +3115,12 @@ impl CommandBuffer {
                         as u32,
             };
 
-            crate::vkCmdBindDescriptorBuffersEXT(self.buffer, 1, &binding_info);
+            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
+                self._device,
+                self.buffer,
+                1,
+                &binding_info,
+            );
         }
     }
 
@@ -3045,7 +3135,8 @@ impl CommandBuffer {
     ) {
         unsafe {
             let buffer_index = 0u32; // We bind one descriptor buffer at a time
-            crate::vkCmdSetDescriptorBufferOffsetsEXT(
+            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
+                self._device,
                 self.buffer,
                 bind_point,
                 layout.vk_layout(),
@@ -3128,12 +3219,18 @@ impl CommandBuffer {
                         as u32,
             };
 
-            crate::vkCmdBindDescriptorBuffersEXT(self.buffer, 1, &binding_info);
+            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
+                self._device,
+                self.buffer,
+                1,
+                &binding_info,
+            );
 
             // Set the offset for this descriptor set
             let buffer_index = 0u32;
             let offset = 0u64;
-            crate::vkCmdSetDescriptorBufferOffsetsEXT(
+            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
+                self._device,
                 self.buffer,
                 crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
                 layout.vk_layout(),
@@ -3162,12 +3259,18 @@ impl CommandBuffer {
                         as u32,
             };
 
-            crate::vkCmdBindDescriptorBuffersEXT(self.buffer, 1, &binding_info);
+            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
+                self._device,
+                self.buffer,
+                1,
+                &binding_info,
+            );
 
             // Set the offset for this descriptor set
             let buffer_index = 0u32;
             let offset = 0u64;
-            crate::vkCmdSetDescriptorBufferOffsetsEXT(
+            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
+                self._device,
                 self.buffer,
                 crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE,
                 layout.vk_layout(),
@@ -3359,12 +3462,15 @@ impl DescriptorHeap {
             let offset = self.count * self.descriptor_size;
             let dest_ptr = self.buffer.cpu_ptr.add(offset) as *mut std::ffi::c_void;
 
-            crate::vkGetDescriptorEXT(
+            if !vk_get_descriptor_ext_dynamic(
                 self.device,
                 &descriptor_info,
                 self.descriptor_size,
                 dest_ptr,
-            );
+            ) {
+                crate::vkDestroyImageView(self.device, image_view, ptr::null());
+                return Err(Error::Unsupported);
+            }
 
             // Store image view for cleanup
             // TODO: Store image view for later destruction
