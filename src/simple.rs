@@ -1,5 +1,47 @@
 //! A simple graphics API abstraction inspired by "No Graphics API" blog post.
-//! Provides gpuMalloc/gpuFree style memory management and simplified rendering.
+//! Provides `gpuMalloc`/`gpuFree` style memory management and simplified rendering.
+//!
+//! # Buffer upload model
+//!
+//! Buffer uploads are architecture-aware:
+//! - **UMA (integrated / unified memory):** buffers are uploaded directly through mapped memory.
+//! - **Discrete GPU memory:** data is uploaded through an internal staging buffer and transfer copy.
+//!
+//! You can query this behavior with [`GraphicsContext::is_unified_memory`].
+//!
+//! # Typical indexed rendering flow
+//!
+//! ```no_run
+//! use rust_and_vulkan::simple::{
+//!     Buffer, CommandBuffer, GraphicsContext, IndexType,
+//! };
+//!
+//! # fn demo(context: &GraphicsContext) -> rust_and_vulkan::simple::Result<()> {
+//! #[repr(C)]
+//! #[derive(Clone, Copy)]
+//! struct Vertex {
+//!     pos: [f32; 3],
+//!     uv: [f32; 2],
+//! }
+//!
+//! let vertices = [
+//!     Vertex { pos: [-0.5, -0.5, 0.0], uv: [0.0, 0.0] },
+//!     Vertex { pos: [ 0.5, -0.5, 0.0], uv: [1.0, 0.0] },
+//!     Vertex { pos: [ 0.0,  0.5, 0.0], uv: [0.5, 1.0] },
+//! ];
+//! let indices: [u32; 3] = [0, 1, 2];
+//!
+//! let vertex_buffer = Buffer::vertex_buffer(context, &vertices)?;
+//! let index_buffer = Buffer::index_buffer_u32(context, &indices)?;
+//!
+//! let cmd = CommandBuffer::allocate(context)?;
+//! cmd.begin()?;
+//! cmd.bind_vertex_buffer(0, &vertex_buffer, 0);
+//! cmd.bind_index_buffer(&index_buffer, 0, IndexType::U32);
+//! cmd.draw_indexed(indices.len() as u32, 1, 0, 0, 0);
+//! cmd.end()?;
+//! # Ok(()) }
+//! ```
 
 use std::ptr;
 
@@ -180,6 +222,7 @@ pub struct GraphicsContext {
     _present_queue: crate::VkQueue,
     _command_pool: crate::VkCommandPool,
     memory_properties: crate::VkPhysicalDeviceMemoryProperties,
+    has_uma: bool,
 }
 
 impl GraphicsContext {
@@ -196,6 +239,21 @@ impl GraphicsContext {
             let mut memory_properties = std::mem::zeroed();
             crate::vkGetPhysicalDeviceMemoryProperties(physical_device, &mut memory_properties);
 
+            let mut has_uma = false;
+            for i in 0..memory_properties.memoryTypeCount {
+                let flags = memory_properties.memoryTypes[i as usize].propertyFlags;
+                let host_visible = (flags
+                    & crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
+                    != 0;
+                let device_local = (flags
+                    & crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32)
+                    != 0;
+                if host_visible && device_local {
+                    has_uma = true;
+                    break;
+                }
+            }
+
             Ok(GraphicsContext {
                 _instance: instance,
                 _physical_device: physical_device,
@@ -204,8 +262,15 @@ impl GraphicsContext {
                 _present_queue: present_queue,
                 _command_pool: command_pool,
                 memory_properties,
+                has_uma,
             })
         }
+    }
+
+    /// Returns true when the current adapter exposes unified memory (UMA),
+    /// meaning at least one memory type is both host-visible and device-local.
+    pub fn is_unified_memory(&self) -> bool {
+        self.has_uma
     }
 
     /// Find memory type index for given memory type
@@ -398,6 +463,95 @@ impl GraphicsContext {
     /// Free GPU memory (handled by Drop implementation of GpuAllocation)
     pub fn gpu_free(_allocation: GpuAllocation) {
         // Memory is freed when allocation goes out of scope
+    }
+
+    /// Create a buffer and upload data efficiently.
+    ///
+    /// On UMA systems this allocates host-visible memory directly and writes in place.
+    /// On discrete systems this allocates device-local memory and performs upload via
+    /// a staging buffer and transfer copy.
+    pub fn create_buffer_with_data(&self, usage: BufferUsage, data: &[u8]) -> Result<Buffer> {
+        if data.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+
+        if self.has_uma {
+            let mut direct_usage = usage;
+            direct_usage.insert(BufferUsage::TRANSFER_SRC);
+            let buffer = Buffer::new(self, data.len(), direct_usage, MemoryType::CpuMapped)?;
+            buffer.write(data)?;
+            Ok(buffer)
+        } else {
+            let mut device_usage = usage;
+            device_usage.insert(BufferUsage::TRANSFER_DST);
+            let device_buffer = Buffer::new(self, data.len(), device_usage, MemoryType::GpuOnly)?;
+
+            let staging = Buffer::new(
+                self,
+                data.len(),
+                BufferUsage::TRANSFER_SRC,
+                MemoryType::CpuMapped,
+            )?;
+            staging.write(data)?;
+
+            let command_buffer = CommandBuffer::allocate(self)?;
+            command_buffer.begin()?;
+            command_buffer.copy_vk_buffer(
+                staging.vk_buffer(),
+                device_buffer.vk_buffer(),
+                data.len(),
+                0,
+                0,
+            )?;
+            command_buffer.end()?;
+
+            let fence = self.submit(&command_buffer)?;
+            fence.wait_forever()?;
+
+            Ok(device_buffer)
+        }
+    }
+
+    /// Create and upload a typed vertex buffer.
+    pub fn create_vertex_buffer<T: Copy>(&self, vertices: &[T]) -> Result<Buffer> {
+        if vertices.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                vertices.as_ptr() as *const u8,
+                std::mem::size_of_val(vertices),
+            )
+        };
+        self.create_buffer_with_data(BufferUsage::VERTEX, bytes)
+    }
+
+    /// Create and upload a typed index buffer.
+    pub fn create_index_buffer_u16(&self, indices: &[u16]) -> Result<Buffer> {
+        if indices.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                indices.as_ptr() as *const u8,
+                std::mem::size_of_val(indices),
+            )
+        };
+        self.create_buffer_with_data(BufferUsage::INDEX, bytes)
+    }
+
+    /// Create and upload a typed index buffer.
+    pub fn create_index_buffer_u32(&self, indices: &[u32]) -> Result<Buffer> {
+        if indices.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                indices.as_ptr() as *const u8,
+                std::mem::size_of_val(indices),
+            )
+        };
+        self.create_buffer_with_data(BufferUsage::INDEX, bytes)
     }
 
     /// Upload texture data with optimal GPU memory allocation
@@ -806,6 +960,9 @@ impl GpuAllocation {
 
     /// Write data to the allocation
     pub fn write(&self, data: &[u8]) -> Result<()> {
+        if self.cpu_ptr.is_null() {
+            return Err(Error::Unsupported);
+        }
         if data.len() > self.size {
             return Err(Error::InvalidArgument);
         }
@@ -901,6 +1058,22 @@ pub struct Buffer {
     device: crate::VkDevice,
 }
 
+/// Index format for index buffer binding and indexed drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexType {
+    U16,
+    U32,
+}
+
+impl IndexType {
+    fn to_vk(self) -> crate::VkIndexType {
+        match self {
+            IndexType::U16 => crate::VkIndexType::VK_INDEX_TYPE_UINT16,
+            IndexType::U32 => crate::VkIndexType::VK_INDEX_TYPE_UINT32,
+        }
+    }
+}
+
 impl Buffer {
     /// Create a new buffer with specified size, usage, and memory type
     pub fn new(
@@ -910,6 +1083,10 @@ impl Buffer {
         memory_type: MemoryType,
     ) -> Result<Self> {
         use std::ptr;
+
+        if size == 0 {
+            return Err(Error::InvalidArgument);
+        }
 
         // Convert usage flags to Vulkan buffer usage
         let mut vk_usage = 0u32;
@@ -931,9 +1108,6 @@ impl Buffer {
         if usage.contains(BufferUsage::TRANSFER_DST) {
             vk_usage |= crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT as u32;
         }
-
-        // Find memory type
-        let memory_type_index = context.find_memory_type(memory_type)?;
 
         unsafe {
             // Create buffer
@@ -961,6 +1135,9 @@ impl Buffer {
             // Get memory requirements
             let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
             crate::vkGetBufferMemoryRequirements(context.device, buffer, &mut requirements);
+
+            let memory_type_index =
+                context.find_compatible_memory_type(memory_type, requirements.memoryTypeBits)?;
 
             // Allocate memory
             let alloc_info = crate::VkMemoryAllocateInfo {
@@ -1048,6 +1225,40 @@ impl Buffer {
             std::ptr::copy_nonoverlapping(data.as_ptr(), self.cpu_ptr, data.len());
         }
         Ok(())
+    }
+
+    /// Write data to the buffer at a byte offset.
+    pub fn write_at(&self, offset: usize, data: &[u8]) -> Result<()> {
+        if self.cpu_ptr.is_null() {
+            return Err(Error::Unsupported);
+        }
+        if offset > self.size || data.len() > (self.size - offset) {
+            return Err(Error::InvalidArgument);
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), self.cpu_ptr.add(offset), data.len());
+        }
+        Ok(())
+    }
+
+    /// Create and upload a buffer from raw bytes.
+    pub fn from_data(context: &GraphicsContext, usage: BufferUsage, data: &[u8]) -> Result<Self> {
+        context.create_buffer_with_data(usage, data)
+    }
+
+    /// Create and upload a typed vertex buffer.
+    pub fn vertex_buffer<T: Copy>(context: &GraphicsContext, vertices: &[T]) -> Result<Self> {
+        context.create_vertex_buffer(vertices)
+    }
+
+    /// Create and upload a `u16` index buffer.
+    pub fn index_buffer_u16(context: &GraphicsContext, indices: &[u16]) -> Result<Self> {
+        context.create_index_buffer_u16(indices)
+    }
+
+    /// Create and upload a `u32` index buffer.
+    pub fn index_buffer_u32(context: &GraphicsContext, indices: &[u32]) -> Result<Self> {
+        context.create_index_buffer_u32(indices)
     }
 
     /// Get the Vulkan buffer handle
@@ -2416,15 +2627,78 @@ impl CommandBuffer {
 
     /// Copy data between GPU buffers
     pub fn copy_buffer(&self, src: &GpuAllocation, dst: &GpuAllocation, size: usize) -> Result<()> {
+        self.copy_vk_buffer(src.buffer(), dst.buffer(), size, 0, 0)
+    }
+
+    /// Copy data between Vulkan buffers.
+    pub fn copy_vk_buffer(
+        &self,
+        src: crate::VkBuffer,
+        dst: crate::VkBuffer,
+        size: usize,
+        src_offset: u64,
+        dst_offset: u64,
+    ) -> Result<()> {
+        if size == 0 {
+            return Err(Error::InvalidArgument);
+        }
         unsafe {
             let copy_region = crate::VkBufferCopy {
-                srcOffset: 0,
-                dstOffset: 0,
+                srcOffset: src_offset,
+                dstOffset: dst_offset,
                 size: size as u64,
             };
-            crate::vkCmdCopyBuffer(self.buffer, src.buffer(), dst.buffer(), 1, &copy_region);
+            crate::vkCmdCopyBuffer(self.buffer, src, dst, 1, &copy_region);
         }
         Ok(())
+    }
+
+    /// Bind a vertex buffer at a specific binding slot.
+    pub fn bind_vertex_buffer(&self, binding: u32, buffer: &Buffer, offset: u64) {
+        unsafe {
+            let buffers = [buffer.vk_buffer()];
+            let offsets = [offset];
+            crate::vkCmdBindVertexBuffers(
+                self.buffer,
+                binding,
+                1,
+                buffers.as_ptr(),
+                offsets.as_ptr(),
+            );
+        }
+    }
+
+    /// Bind an index buffer.
+    pub fn bind_index_buffer(&self, buffer: &Buffer, offset: u64, index_type: IndexType) {
+        unsafe {
+            crate::vkCmdBindIndexBuffer(
+                self.buffer,
+                buffer.vk_buffer(),
+                offset,
+                index_type.to_vk(),
+            );
+        }
+    }
+
+    /// Draw indexed primitives.
+    pub fn draw_indexed(
+        &self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) {
+        unsafe {
+            crate::vkCmdDrawIndexed(
+                self.buffer,
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            );
+        }
     }
 
     /// Insert a pipeline barrier between stages with optional hazard flags
@@ -2732,7 +3006,7 @@ impl CommandBuffer {
     pub fn bind_descriptor_buffer(
         &self,
         heap: &DescriptorHeap,
-        bind_point: crate::VkPipelineBindPoint,
+        _bind_point: crate::VkPipelineBindPoint,
     ) {
         unsafe {
             let binding_info = crate::VkDescriptorBufferBindingInfoEXT {
