@@ -2047,6 +2047,38 @@ impl GraphicsPipeline {
                 pDynamicStates: ptr::null(),
             };
 
+            // Depth stencil state for depth testing
+            let depth_stencil = crate::VkPipelineDepthStencilStateCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                depthTestEnable: 1,
+                depthWriteEnable: 1,
+                depthCompareOp: crate::VkCompareOp::VK_COMPARE_OP_LESS,
+                depthBoundsTestEnable: 0,
+                stencilTestEnable: 0,
+                front: crate::VkStencilOpState {
+                    failOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
+                    passOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
+                    depthFailOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
+                    compareOp: crate::VkCompareOp::VK_COMPARE_OP_ALWAYS,
+                    compareMask: 0,
+                    writeMask: 0,
+                    reference: 0,
+                },
+                back: crate::VkStencilOpState {
+                    failOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
+                    passOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
+                    depthFailOp: crate::VkStencilOp::VK_STENCIL_OP_KEEP,
+                    compareOp: crate::VkCompareOp::VK_COMPARE_OP_ALWAYS,
+                    compareMask: 0,
+                    writeMask: 0,
+                    reference: 0,
+                },
+                minDepthBounds: 0.0,
+                maxDepthBounds: 1.0,
+            };
+
             // Create graphics pipeline
             let pipeline_info = crate::VkGraphicsPipelineCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -2060,7 +2092,7 @@ impl GraphicsPipeline {
                 pViewportState: &viewport_state,
                 pRasterizationState: &rasterization,
                 pMultisampleState: &multisampling,
-                pDepthStencilState: ptr::null(),
+                pDepthStencilState: &depth_stencil,
                 pColorBlendState: &color_blending,
                 pDynamicState: &dynamic_state,
                 layout: layout.vk_layout(),
@@ -2468,16 +2500,25 @@ impl CommandBuffer {
         clear_color: [f32; 4],
     ) {
         unsafe {
-            let clear_value = crate::VkClearValue {
-                color: crate::VkClearColorValue {
-                    float32: [
-                        clear_color[0],
-                        clear_color[1],
-                        clear_color[2],
-                        clear_color[3],
-                    ],
+            // Prepare clear values for both color and depth attachments
+            let clear_values = [
+                crate::VkClearValue {
+                    color: crate::VkClearColorValue {
+                        float32: [
+                            clear_color[0],
+                            clear_color[1],
+                            clear_color[2],
+                            clear_color[3],
+                        ],
+                    },
                 },
-            };
+                crate::VkClearValue {
+                    depthStencil: crate::VkClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                },
+            ];
 
             let render_pass_begin = crate::VkRenderPassBeginInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -2488,8 +2529,8 @@ impl CommandBuffer {
                     offset: crate::VkOffset2D { x: 0, y: 0 },
                     extent: crate::VkExtent2D { width, height },
                 },
-                clearValueCount: 1,
-                pClearValues: &clear_value,
+                clearValueCount: 2,
+                pClearValues: clear_values.as_ptr(),
             };
 
             crate::vkCmdBeginRenderPass(
@@ -2855,6 +2896,11 @@ pub struct Swapchain {
     #[allow(dead_code)]
     images: Vec<crate::VkImage>,
     image_views: Vec<crate::VkImageView>,
+    depth_image: crate::VkImage,
+    depth_image_view: crate::VkImageView,
+    depth_memory: crate::VkDeviceMemory,
+    #[allow(dead_code)]
+    depth_format: crate::VkFormat,
     render_pass: crate::VkRenderPass,
     framebuffers: Vec<crate::VkFramebuffer>,
     format: crate::VkFormat,
@@ -3109,7 +3155,165 @@ impl Swapchain {
                 image_views.push(image_view);
             }
 
-            // Create render pass
+            // Create depth buffer
+            let depth_format = crate::VkFormat::VK_FORMAT_D32_SFLOAT;
+
+            let depth_image_info = crate::VkImageCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                imageType: crate::VkImageType::VK_IMAGE_TYPE_2D,
+                format: depth_format,
+                extent: crate::VkExtent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                },
+                mipLevels: 1,
+                arrayLayers: 1,
+                samples: crate::VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT,
+                tiling: crate::VkImageTiling::VK_IMAGE_TILING_OPTIMAL,
+                usage: crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                    as u32,
+                sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
+                queueFamilyIndexCount: 0,
+                pQueueFamilyIndices: ptr::null(),
+                initialLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+            };
+
+            let mut depth_image: crate::VkImage = ptr::null_mut();
+            let result = crate::vkCreateImage(
+                context.device,
+                &depth_image_info,
+                ptr::null(),
+                &mut depth_image,
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                // Clean up image views
+                for &view in &image_views {
+                    crate::vkDestroyImageView(context.device, view, ptr::null());
+                }
+                crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to create depth image: {:?}",
+                    result
+                )));
+            }
+
+            // Get depth image memory requirements
+            let mut depth_requirements: crate::VkMemoryRequirements = std::mem::zeroed();
+            crate::vkGetImageMemoryRequirements(
+                context.device,
+                depth_image,
+                &mut depth_requirements,
+            );
+
+            // Find GPU-local memory type for depth buffer
+            let property_flags =
+                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32;
+            let mut depth_memory_type_index = !0u32;
+            for i in 0..context.memory_properties.memoryTypeCount {
+                let properties = context.memory_properties.memoryTypes[i as usize].propertyFlags;
+                if (properties & property_flags) == property_flags {
+                    depth_memory_type_index = i;
+                    break;
+                }
+            }
+
+            if depth_memory_type_index == !0u32 {
+                crate::vkDestroyImage(context.device, depth_image, ptr::null());
+                for &view in &image_views {
+                    crate::vkDestroyImageView(context.device, view, ptr::null());
+                }
+                crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
+                return Err(Error::Unsupported);
+            }
+
+            // Allocate depth image memory
+            let depth_alloc_info = crate::VkMemoryAllocateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                pNext: ptr::null(),
+                allocationSize: depth_requirements.size,
+                memoryTypeIndex: depth_memory_type_index,
+            };
+
+            let mut depth_memory: crate::VkDeviceMemory = ptr::null_mut();
+            let result = crate::vkAllocateMemory(
+                context.device,
+                &depth_alloc_info,
+                ptr::null(),
+                &mut depth_memory,
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                crate::vkDestroyImage(context.device, depth_image, ptr::null());
+                for &view in &image_views {
+                    crate::vkDestroyImageView(context.device, view, ptr::null());
+                }
+                crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to allocate depth image memory: {:?}",
+                    result
+                )));
+            }
+
+            // Bind depth image memory
+            let result = crate::vkBindImageMemory(context.device, depth_image, depth_memory, 0);
+            if result != crate::VkResult::VK_SUCCESS {
+                crate::vkFreeMemory(context.device, depth_memory, ptr::null());
+                crate::vkDestroyImage(context.device, depth_image, ptr::null());
+                for &view in &image_views {
+                    crate::vkDestroyImageView(context.device, view, ptr::null());
+                }
+                crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to bind depth image memory: {:?}",
+                    result
+                )));
+            }
+
+            // Create depth image view
+            let depth_view_info = crate::VkImageViewCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                image: depth_image,
+                viewType: crate::VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
+                format: depth_format,
+                components: crate::VkComponentMapping {
+                    r: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    g: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    b: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    a: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                subresourceRange: crate::VkImageSubresourceRange {
+                    aspectMask: crate::VkImageAspectFlagBits::VK_IMAGE_ASPECT_DEPTH_BIT as u32,
+                    baseMipLevel: 0,
+                    levelCount: 1,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+            };
+
+            let mut depth_image_view: crate::VkImageView = ptr::null_mut();
+            let result = crate::vkCreateImageView(
+                context.device,
+                &depth_view_info,
+                ptr::null(),
+                &mut depth_image_view,
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                crate::vkFreeMemory(context.device, depth_memory, ptr::null());
+                crate::vkDestroyImage(context.device, depth_image, ptr::null());
+                for &view in &image_views {
+                    crate::vkDestroyImageView(context.device, view, ptr::null());
+                }
+                crate::vkDestroySwapchainKHR(context.device, swapchain, ptr::null());
+                return Err(Error::Vulkan(format!(
+                    "Failed to create depth image view: {:?}",
+                    result
+                )));
+            }
+            // Create render pass with color and depth attachments
             let color_attachment = crate::VkAttachmentDescription {
                 flags: 0,
                 format,
@@ -3122,9 +3326,26 @@ impl Swapchain {
                 finalLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             };
 
+            let depth_attachment = crate::VkAttachmentDescription {
+                flags: 0,
+                format: depth_format,
+                samples: crate::VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT,
+                loadOp: crate::VkAttachmentLoadOp::VK_ATTACHMENT_LOAD_OP_CLEAR,
+                storeOp: crate::VkAttachmentStoreOp::VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                stencilLoadOp: crate::VkAttachmentLoadOp::VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                stencilStoreOp: crate::VkAttachmentStoreOp::VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                initialLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+                finalLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            };
+
             let color_attachment_ref = crate::VkAttachmentReference {
                 attachment: 0,
                 layout: crate::VkImageLayout::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            };
+
+            let depth_attachment_ref = crate::VkAttachmentReference {
+                attachment: 1,
+                layout: crate::VkImageLayout::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             };
 
             let subpass = crate::VkSubpassDescription {
@@ -3135,7 +3356,7 @@ impl Swapchain {
                 colorAttachmentCount: 1,
                 pColorAttachments: &color_attachment_ref,
                 pResolveAttachments: ptr::null(),
-                pDepthStencilAttachment: ptr::null(),
+                pDepthStencilAttachment: &depth_attachment_ref,
                 preserveAttachmentCount: 0,
                 pPreserveAttachments: ptr::null(),
             };
@@ -3144,22 +3365,29 @@ impl Swapchain {
                 srcSubpass: crate::VK_SUBPASS_EXTERNAL as u32,
                 dstSubpass: 0,
                 srcStageMask:
-                    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        as u32,
+                    (crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        as u32
+                        | crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                            as u32),
                 dstStageMask:
-                    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        as u32,
+                    (crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        as u32
+                        | crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                            as u32),
                 srcAccessMask: 0,
-                dstAccessMask: crate::VkAccessFlagBits::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT as u32,
+                dstAccessMask: (crate::VkAccessFlagBits::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                    as u32
+                    | crate::VkAccessFlagBits::VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT as u32),
                 dependencyFlags: 0,
             };
 
+            let attachments = [color_attachment, depth_attachment];
             let render_pass_info = crate::VkRenderPassCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
-                attachmentCount: 1,
-                pAttachments: &color_attachment,
+                attachmentCount: 2,
+                pAttachments: attachments.as_ptr(),
                 subpassCount: 1,
                 pSubpasses: &subpass,
                 dependencyCount: 1,
@@ -3174,6 +3402,9 @@ impl Swapchain {
                 &mut render_pass,
             );
             if result != crate::VkResult::VK_SUCCESS {
+                crate::vkDestroyImageView(context.device, depth_image_view, ptr::null());
+                crate::vkFreeMemory(context.device, depth_memory, ptr::null());
+                crate::vkDestroyImage(context.device, depth_image, ptr::null());
                 for &view in &image_views {
                     crate::vkDestroyImageView(context.device, view, ptr::null());
                 }
@@ -3184,16 +3415,17 @@ impl Swapchain {
                 )));
             }
 
-            // Create framebuffers
+            // Create framebuffers with both color and depth attachments
             let mut framebuffers = Vec::with_capacity(image_views.len());
             for &image_view in &image_views {
+                let attachments = [image_view, depth_image_view];
                 let framebuffer_info = crate::VkFramebufferCreateInfo {
                     sType: crate::VkStructureType::VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
                     pNext: ptr::null(),
                     flags: 0,
                     renderPass: render_pass,
-                    attachmentCount: 1,
-                    pAttachments: &image_view,
+                    attachmentCount: 2,
+                    pAttachments: attachments.as_ptr(),
                     width: extent.width,
                     height: extent.height,
                     layers: 1,
@@ -3212,6 +3444,9 @@ impl Swapchain {
                         crate::vkDestroyFramebuffer(context.device, fb, ptr::null());
                     }
                     crate::vkDestroyRenderPass(context.device, render_pass, ptr::null());
+                    crate::vkDestroyImageView(context.device, depth_image_view, ptr::null());
+                    crate::vkFreeMemory(context.device, depth_memory, ptr::null());
+                    crate::vkDestroyImage(context.device, depth_image, ptr::null());
                     for &view in &image_views {
                         crate::vkDestroyImageView(context.device, view, ptr::null());
                     }
@@ -3228,6 +3463,10 @@ impl Swapchain {
                 swapchain,
                 images,
                 image_views,
+                depth_image,
+                depth_image_view,
+                depth_memory,
+                depth_format,
                 render_pass,
                 framebuffers,
                 format,
@@ -3323,6 +3562,9 @@ impl Drop for Swapchain {
             for &image_view in &self.image_views {
                 crate::vkDestroyImageView(self.device, image_view, std::ptr::null());
             }
+            crate::vkDestroyImageView(self.device, self.depth_image_view, std::ptr::null());
+            crate::vkFreeMemory(self.device, self.depth_memory, std::ptr::null());
+            crate::vkDestroyImage(self.device, self.depth_image, std::ptr::null());
             crate::vkDestroySwapchainKHR(self.device, self.swapchain, std::ptr::null());
         }
     }
