@@ -92,6 +92,12 @@ fn main() -> Result<(), String> {
     let vs = ShaderModule::new(&context, &vert_spv).map_err(|e| e.to_string())?;
     let fs = ShaderModule::new(&context, &frag_spv).map_err(|e| e.to_string())?;
 
+    // This demo currently requires descriptor-buffer bindless textures.
+    // Exit before creating per-device resources if unsupported.
+    if !context.descriptor_buffer_supported() {
+        return Err("Descriptor buffer bindless textures are not supported on this device".to_string());
+    }
+
     // Geometry (vertex pulling via buffer device address)
     let square_vertices = vec![
         Vertex {
@@ -199,25 +205,17 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    let pipeline = if context.descriptor_buffer_supported() {
-        GraphicsPipeline::new_descriptor_buffer(
-            &context,
-            &vs,
-            &fs,
-            &layout,
-            swapchain.render_pass(),
-            Format::Bgra8Unorm,
-            None,
-            None,
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        // Fallback path: traditional descriptor sets. This requires a different pipeline layout,
-        // but we keep the demo simple by erroring out when bindless is unavailable.
-        return Err(
-            "Descriptor buffer bindless textures are not supported on this device".to_string(),
-        );
-    };
+    let pipeline = GraphicsPipeline::new_descriptor_buffer(
+        &context,
+        &vs,
+        &fs,
+        &layout,
+        swapchain.render_pass(),
+        Format::Bgra8Unorm,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
 
     let start = std::time::Instant::now();
 

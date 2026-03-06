@@ -2185,6 +2185,10 @@ impl DescriptorSetLayout {
     pub fn new_bindless_textures(context: &GraphicsContext, max_textures: u32) -> Result<Self> {
         use std::ptr;
 
+        if !context.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
         unsafe {
             let binding = crate::VkDescriptorSetLayoutBinding {
                 binding: 0,
@@ -2669,6 +2673,10 @@ impl GraphicsPipeline {
         vertex_specialization: Option<&SpecializationConstants>,
         fragment_specialization: Option<&SpecializationConstants>,
     ) -> Result<Self> {
+        if !context.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
         Self::new_internal(
             context,
             vertex_shader,
@@ -2724,6 +2732,10 @@ impl GraphicsPipeline {
         vertex_specialization: Option<&SpecializationConstants>,
         fragment_specialization: Option<&SpecializationConstants>,
     ) -> Result<Self> {
+        if !context.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+
         Self::new_internal(
             context,
             vertex_shader,

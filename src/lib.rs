@@ -331,12 +331,103 @@ impl VulkanDevice {
             }
             physical_devices.set_len(device_count as usize);
 
-            // Select a suitable physical device
-            let physical_device = physical_devices
-                .into_iter()
-                .next()
-                .ok_or("No Vulkan physical devices found".to_string())?;
-            eprintln!("Selected physical device");
+            // Select a suitable physical device.
+            // Prefer discrete GPUs (e.g. RTX) over integrated adapters (e.g. Intel UHD),
+            // but only among devices that can provide graphics + present queues.
+            // Optional override: set VULKAN_DEVICE_NAME to a case-insensitive substring.
+            let forced_device_name = std::env::var("VULKAN_DEVICE_NAME")
+                .ok()
+                .map(|v| v.to_ascii_lowercase());
+
+            let mut selected_device: Option<crate::VkPhysicalDevice> = None;
+            let mut selected_score: i32 = i32::MIN;
+            let mut selected_name = String::new();
+
+            for candidate in physical_devices {
+                let mut props: crate::VkPhysicalDeviceProperties = std::mem::zeroed();
+                crate::vkGetPhysicalDeviceProperties(candidate, &mut props);
+                let name = std::ffi::CStr::from_ptr(props.deviceName.as_ptr() as *const c_char)
+                    .to_string_lossy()
+                    .into_owned();
+
+                let mut queue_family_count = 0;
+                crate::vkGetPhysicalDeviceQueueFamilyProperties(
+                    candidate,
+                    &mut queue_family_count,
+                    std::ptr::null_mut(),
+                );
+                if queue_family_count == 0 {
+                    continue;
+                }
+                let mut queue_families = Vec::with_capacity(queue_family_count as usize);
+                crate::vkGetPhysicalDeviceQueueFamilyProperties(
+                    candidate,
+                    &mut queue_family_count,
+                    queue_families.as_mut_ptr(),
+                );
+                queue_families.set_len(queue_family_count as usize);
+
+                let has_graphics_queue = queue_families.iter().any(|props| {
+                    props.queueFlags & (crate::VkQueueFlagBits::VK_QUEUE_GRAPHICS_BIT as u32) != 0
+                });
+                if !has_graphics_queue {
+                    continue;
+                }
+
+                let has_present_queue = if let Some(ref surf) = surface {
+                    let mut supported = false;
+                    for i in 0..queue_families.len() {
+                        let mut present_support = 0u32;
+                        let result = crate::vkGetPhysicalDeviceSurfaceSupportKHR(
+                            candidate,
+                            i as u32,
+                            surf.surface,
+                            &mut present_support,
+                        );
+                        if result == crate::VkResult::VK_SUCCESS && present_support != 0 {
+                            supported = true;
+                            break;
+                        }
+                    }
+                    supported
+                } else {
+                    true
+                };
+                if !has_present_queue {
+                    continue;
+                }
+
+                let mut score = match props.deviceType {
+                    crate::VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU => 1000,
+                    crate::VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU => 600,
+                    crate::VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU => 300,
+                    crate::VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_CPU => 100,
+                    _ => 50,
+                };
+
+                if let Some(ref forced) = forced_device_name {
+                    if name.to_ascii_lowercase().contains(forced) {
+                        score += 10_000;
+                    } else {
+                        score -= 2_000;
+                    }
+                }
+
+                eprintln!("Physical device candidate: '{name}', score={score}");
+
+                if score > selected_score {
+                    selected_score = score;
+                    selected_name = name;
+                    selected_device = Some(candidate);
+                }
+            }
+
+            let physical_device = selected_device
+                .ok_or("No suitable Vulkan physical device found".to_string())?;
+            eprintln!(
+                "Selected physical device: '{}' (score={})",
+                selected_name, selected_score
+            );
 
             // Get queue family properties
             let mut queue_family_count = 0;
