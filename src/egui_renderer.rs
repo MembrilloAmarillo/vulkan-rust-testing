@@ -6,7 +6,8 @@
 use egui::ClippedPrimitive;
 
 use crate::simple::{
-    Buffer, CommandBuffer, Format, GraphicsContext, GraphicsPipeline, PipelineLayout, ShaderModule,
+    Buffer, BufferUsage, CommandBuffer, Format, GraphicsContext, GraphicsPipeline, MemoryType,
+    PipelineLayout, ShaderModule,
 };
 
 #[repr(C)]
@@ -22,6 +23,8 @@ struct UIVertex {
 struct UIPushConstants {
     vertex_ptr: u64,
     projection: [[f32; 4]; 4],
+    // Padding to match GLSL alignment (std430 may add padding)
+    _padding: [u32; 2],
 }
 
 pub struct EguiRenderer {
@@ -122,18 +125,74 @@ impl EguiRenderer {
 
         // Update or create vertex buffer
         if !vertices.is_empty() {
-            self.vertex_buffer = Some(
-                Buffer::from_device_address(context, &vertices)
-                    .map_err(|e| format!("Failed to create vertex buffer: {}", e))?,
-            );
+            let buffer = Buffer::new(
+                context,
+                vertices.len() * std::mem::size_of::<UIVertex>(),
+                BufferUsage::VERTEX,
+                MemoryType::CpuMapped,
+            )
+            .map_err(|e| format!("Failed to create vertex buffer: {}", e))?;
+
+            // Write vertex data
+            let vertex_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    vertices.as_ptr() as *const u8,
+                    vertices.len() * std::mem::size_of::<UIVertex>(),
+                )
+            };
+            buffer
+                .write(vertex_bytes)
+                .map_err(|e| format!("Failed to write vertex buffer: {}", e))?;
+
+            self.vertex_buffer = Some(buffer);
         }
 
         // Update or create index buffer
         if !indices.is_empty() {
-            self.index_buffer = Some(
-                Buffer::from_device_address(context, &indices)
-                    .map_err(|e| format!("Failed to create index buffer: {}", e))?,
-            );
+            let buffer = Buffer::new(
+                context,
+                indices.len() * std::mem::size_of::<u32>(),
+                BufferUsage::INDEX,
+                MemoryType::CpuMapped,
+            )
+            .map_err(|e| format!("Failed to create index buffer: {}", e))?;
+
+            // Write index data
+            let index_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    indices.as_ptr() as *const u8,
+                    indices.len() * std::mem::size_of::<u32>(),
+                )
+            };
+            buffer
+                .write(index_bytes)
+                .map_err(|e| format!("Failed to write index buffer: {}", e))?;
+
+            self.index_buffer = Some(buffer);
+        }
+
+        // Update or create index buffer
+        if !indices.is_empty() {
+            let buffer = Buffer::new(
+                context,
+                indices.len() * std::mem::size_of::<u32>(),
+                BufferUsage::INDEX,
+                MemoryType::CpuMapped,
+            )
+            .map_err(|e| format!("Failed to create index buffer: {}", e))?;
+
+            // Write index data
+            let index_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    indices.as_ptr() as *const u8,
+                    indices.len() * std::mem::size_of::<u32>(),
+                )
+            };
+            buffer
+                .write(index_bytes)
+                .map_err(|e| format!("Failed to write index buffer: {}", e))?;
+
+            self.index_buffer = Some(buffer);
         }
 
         Ok(())
@@ -157,6 +216,7 @@ impl EguiRenderer {
         let pc = UIPushConstants {
             vertex_ptr: self.vertex_buffer.as_ref().unwrap().device_address(),
             projection: proj,
+            _padding: [0, 0],
         };
 
         let pc_bytes = unsafe {
