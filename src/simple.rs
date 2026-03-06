@@ -2651,7 +2651,6 @@ impl GraphicsPipeline {
             0, // no special pipeline create flags
             false,
             true,
-            false, // static scissor
         )
     }
 
@@ -2682,7 +2681,6 @@ impl GraphicsPipeline {
             crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
             false,
             true,
-            false, // static scissor
         )
     }
 
@@ -2710,7 +2708,6 @@ impl GraphicsPipeline {
             0,
             true,
             true,
-            false, // static scissor
         )
     }
 
@@ -2739,7 +2736,6 @@ impl GraphicsPipeline {
             crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
             true,
             false, // egui draws at Z=0 like the scene; disable depth test to avoid being culled
-            true,  // dynamic scissor for per-primitive clip rects
         )
     }
 
@@ -2755,7 +2751,6 @@ impl GraphicsPipeline {
         pipeline_create_flags: u32,
         blend_enable: bool,
         depth_test_enable: bool,
-        dynamic_scissor: bool,
     ) -> Result<Self> {
         use std::ptr;
 
@@ -2882,28 +2877,18 @@ impl GraphicsPipeline {
                 blendConstants: [0.0, 0.0, 0.0, 0.0],
             };
 
-            // Viewport is always dynamic; scissor is dynamic when requested (e.g. for egui
-            // clip regions).  The static viewport values in VkPipelineViewportStateCreateInfo
-            // are ignored when the state is dynamic, so no dummy structs are needed.
-            let dynamic_states_all = [
+            // Viewport and scissor are always dynamic.  The driver ignores pViewports/pScissors
+            // when the corresponding state is listed in the dynamic state array.
+            let dynamic_states = [
                 crate::VkDynamicState::VK_DYNAMIC_STATE_VIEWPORT,
                 crate::VkDynamicState::VK_DYNAMIC_STATE_SCISSOR,
             ];
-            let dynamic_states_viewport_only = [crate::VkDynamicState::VK_DYNAMIC_STATE_VIEWPORT];
             let dynamic_state = crate::VkPipelineDynamicStateCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
-                dynamicStateCount: if dynamic_scissor {
-                    dynamic_states_all.len() as u32
-                } else {
-                    dynamic_states_viewport_only.len() as u32
-                },
-                pDynamicStates: if dynamic_scissor {
-                    dynamic_states_all.as_ptr()
-                } else {
-                    dynamic_states_viewport_only.as_ptr()
-                },
+                dynamicStateCount: dynamic_states.len() as u32,
+                pDynamicStates: dynamic_states.as_ptr(),
             };
 
             // Depth stencil state for depth testing
@@ -3462,6 +3447,14 @@ impl CommandBuffer {
                 maxDepth: 1.0,
             };
             crate::vkCmdSetViewport(self.buffer, 0, 1, &viewport);
+
+            // Default scissor to the full framebuffer.  Callers that need per-draw clip
+            // regions (e.g. egui) can override with a subsequent set_scissor call.
+            let scissor = crate::VkRect2D {
+                offset: crate::VkOffset2D { x: 0, y: 0 },
+                extent: crate::VkExtent2D { width, height },
+            };
+            crate::vkCmdSetScissor(self.buffer, 0, 1, &scissor);
         }
     }
 
