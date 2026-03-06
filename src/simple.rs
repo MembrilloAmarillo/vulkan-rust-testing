@@ -310,12 +310,14 @@ impl Format {
 
 /// Main context for the simple graphics API
 pub struct GraphicsContext {
-    _instance: crate::VkInstance,
-    _physical_device: crate::VkPhysicalDevice,
+    // Kept alive for the lifetime of the context; not accessed directly after creation.
+    #[allow(dead_code)]
+    instance: crate::VkInstance,
+    physical_device: crate::VkPhysicalDevice,
     device: crate::VkDevice,
-    _graphics_queue: crate::VkQueue,
-    _present_queue: crate::VkQueue,
-    _command_pool: crate::VkCommandPool,
+    graphics_queue: crate::VkQueue,
+    present_queue: crate::VkQueue,
+    command_pool: crate::VkCommandPool,
     memory_properties: crate::VkPhysicalDeviceMemoryProperties,
     has_uma: bool,
     descriptor_buffer_supported: bool,
@@ -352,12 +354,12 @@ impl GraphicsContext {
             }
 
             Ok(GraphicsContext {
-                _instance: instance,
-                _physical_device: physical_device,
+                instance,
+                physical_device,
                 device,
-                _graphics_queue: graphics_queue,
-                _present_queue: present_queue,
-                _command_pool: command_pool,
+                graphics_queue,
+                present_queue,
+                command_pool,
                 memory_properties,
                 has_uma,
                 descriptor_buffer_supported,
@@ -381,31 +383,6 @@ impl GraphicsContext {
     }
 
     /// Find memory type index for given memory type
-    fn find_memory_type(&self, memory_type: MemoryType) -> Result<u32> {
-        let property_flags = match memory_type {
-            MemoryType::CpuMapped => {
-                (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
-                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_COHERENT_BIT as u32)
-            }
-            MemoryType::GpuOnly => {
-                crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT as u32
-            }
-            MemoryType::CpuCached => {
-                (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT as u32)
-                    | (crate::VkMemoryPropertyFlagBits::VK_MEMORY_PROPERTY_HOST_CACHED_BIT as u32)
-            }
-        };
-
-        for i in 0..self.memory_properties.memoryTypeCount {
-            let properties = self.memory_properties.memoryTypes[i as usize].propertyFlags;
-            if (properties & property_flags) == property_flags {
-                return Ok(i);
-            }
-        }
-
-        Err(Error::Unsupported)
-    }
-
     /// Find a memory type that matches both property requirements and buffer memoryTypeBits
     fn find_compatible_memory_type(
         &self,
@@ -436,27 +413,29 @@ impl GraphicsContext {
             }
         }
 
-        // Fallback: if no exact match, try just the property flags
-        self.find_memory_type(memory_type)
+        Err(Error::Unsupported)
     }
 
-    /// Allocate GPU memory with specified size, alignment and type
-    pub fn gpu_malloc(
+    /// Internal allocation helper. Allocates a `VkBuffer` + `VkDeviceMemory` pair with the
+    /// specified `usage` flags, binds them together, maps the memory if CPU-accessible, and
+    /// returns a `GpuAllocation` with a valid device address.
+    fn gpu_malloc_internal(
         &self,
         size: usize,
-        _alignment: usize,
+        alignment: usize,
         memory_type: MemoryType,
+        usage: u32,
     ) -> Result<GpuAllocation> {
-        // Create buffer first to get memory requirements
+        if size == 0 {
+            return Err(Error::InvalidArgument);
+        }
+
         let buffer_info = crate::VkBufferCreateInfo {
             sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             pNext: ptr::null(),
             flags: 0,
             size: size as u64,
-            usage: (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_SRC_BIT as u32)
-                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT as u32)
-                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT as u32)
-                | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_STORAGE_BUFFER_BIT as u32),
+            usage,
             sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
             queueFamilyIndexCount: 0,
             pQueueFamilyIndices: ptr::null(),
@@ -475,154 +454,10 @@ impl GraphicsContext {
             let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
             crate::vkGetBufferMemoryRequirements(self.device, buffer, &mut requirements);
 
-            // Find memory type that satisfies both property flags AND buffer requirements
             let memory_type_index =
                 self.find_compatible_memory_type(memory_type, requirements.memoryTypeBits)?;
 
-            // Adjust size for alignment
-            let aligned_size = if requirements.size % requirements.alignment == 0 {
-                requirements.size
-            } else {
-                (requirements.size / requirements.alignment + 1) * requirements.alignment
-            };
-
-            // Allocate memory with device address flag for buffer device address
-            let mut flags_info = crate::VkMemoryAllocateFlagsInfo {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
-                pNext: ptr::null(),
-                flags: crate::VkMemoryAllocateFlagBits::VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
-                    as u32,
-                deviceMask: 0,
-            };
-
-            let alloc_info = crate::VkMemoryAllocateInfo {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                pNext: &mut flags_info as *mut _ as *mut std::ffi::c_void,
-                allocationSize: aligned_size,
-                memoryTypeIndex: memory_type_index,
-            };
-
-            let mut memory: crate::VkDeviceMemory = ptr::null_mut();
-            let result =
-                crate::vkAllocateMemory(self.device, &alloc_info, ptr::null(), &mut memory);
-            if result != crate::VkResult::VK_SUCCESS {
-                crate::vkDestroyBuffer(self.device, buffer, ptr::null());
-                return Err(Error::Vulkan(format!(
-                    "Failed to allocate memory: {:?}",
-                    result
-                )));
-            }
-
-            // Bind memory to buffer
-            let result = crate::vkBindBufferMemory(self.device, buffer, memory, 0);
-            if result != crate::VkResult::VK_SUCCESS {
-                crate::vkDestroyBuffer(self.device, buffer, ptr::null());
-                crate::vkFreeMemory(self.device, memory, ptr::null());
-                return Err(Error::Vulkan(format!(
-                    "Failed to bind buffer memory: {:?}",
-                    result
-                )));
-            }
-
-            // Map memory if CPU accessible
-            let cpu_ptr = if memory_type == MemoryType::CpuMapped
-                || memory_type == MemoryType::CpuCached
-            {
-                let mut mapped_ptr: *mut std::ffi::c_void = ptr::null_mut();
-                let result =
-                    crate::vkMapMemory(self.device, memory, 0, aligned_size, 0, &mut mapped_ptr);
-                if result != crate::VkResult::VK_SUCCESS {
-                    crate::vkDestroyBuffer(self.device, buffer, ptr::null());
-                    crate::vkFreeMemory(self.device, memory, ptr::null());
-                    return Err(Error::Vulkan(format!("Failed to map memory: {:?}", result)));
-                }
-                mapped_ptr as *mut u8
-            } else {
-                ptr::null_mut()
-            };
-
-            // Get device address
-            let addr_info = crate::VkBufferDeviceAddressInfo {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-                pNext: ptr::null(),
-                buffer: buffer,
-            };
-            let device_address = crate::vkGetBufferDeviceAddress(self.device, &addr_info);
-
-            Ok(GpuAllocation {
-                buffer: buffer,
-                memory: memory,
-                cpu_ptr: cpu_ptr,
-                gpu_ptr: device_address,
-                size: size,
-                device: self.device,
-            })
-        }
-    }
-
-    /// Simplified gpu_malloc for common case (CPU-mapped, 16-byte aligned)
-    pub fn gpu_malloc_simple<T>(&self, count: usize) -> Result<GpuAllocation> {
-        let size = std::mem::size_of::<T>() * count;
-        let alignment = std::mem::align_of::<T>();
-        self.gpu_malloc(size, alignment, MemoryType::CpuMapped)
-    }
-
-    /// Free GPU memory (handled by Drop implementation of GpuAllocation)
-    pub fn gpu_free(_allocation: GpuAllocation) {
-        // Memory is freed when allocation goes out of scope
-    }
-
-    /// Allocate a descriptor buffer (VK_EXT_descriptor_buffer) suitable for binding with
-    /// `VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT`.
-    ///
-    /// This is needed for `TextureDescriptorHeap` to pass validation when binding via
-    /// `vkCmdBindDescriptorBuffersEXT`.
-    pub fn gpu_malloc_descriptor_buffer(
-        &self,
-        size: usize,
-        alignment: usize,
-    ) -> Result<GpuAllocation> {
-        use std::ptr;
-
-        if size == 0 {
-            return Err(Error::InvalidArgument);
-        }
-        if !self.descriptor_buffer_supported() {
-            return Err(Error::Unsupported);
-        }
-
-        unsafe {
-            let buffer_info = crate::VkBufferCreateInfo {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                pNext: ptr::null(),
-                flags: 0,
-                size: size as u64,
-                usage:
-                    (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
-                        as u32)
-                        | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                            as u32),
-                sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
-                queueFamilyIndexCount: 0,
-                pQueueFamilyIndices: ptr::null(),
-            };
-
-            let mut buffer: crate::VkBuffer = ptr::null_mut();
-            let result = crate::vkCreateBuffer(self.device, &buffer_info, ptr::null(), &mut buffer);
-            if result != crate::VkResult::VK_SUCCESS {
-                return Err(Error::Vulkan(format!(
-                    "Failed to create descriptor buffer: {:?}",
-                    result
-                )));
-            }
-
-            let mut requirements: crate::VkMemoryRequirements = std::mem::zeroed();
-            crate::vkGetBufferMemoryRequirements(self.device, buffer, &mut requirements);
-
-            let memory_type_index = self
-                .find_compatible_memory_type(MemoryType::CpuMapped, requirements.memoryTypeBits)?;
-
-            // Align allocation size to Vulkan requirements (and caller alignment to be safe)
+            // Honour both Vulkan's alignment requirement and the caller's requested alignment.
             let required_align = requirements.alignment.max(alignment as u64);
             let aligned_size = if requirements.size % required_align == 0 {
                 requirements.size
@@ -651,7 +486,7 @@ impl GraphicsContext {
             if result != crate::VkResult::VK_SUCCESS {
                 crate::vkDestroyBuffer(self.device, buffer, ptr::null());
                 return Err(Error::Vulkan(format!(
-                    "Failed to allocate descriptor buffer memory: {:?}",
+                    "Failed to allocate memory: {:?}",
                     result
                 )));
             }
@@ -661,22 +496,26 @@ impl GraphicsContext {
                 crate::vkDestroyBuffer(self.device, buffer, ptr::null());
                 crate::vkFreeMemory(self.device, memory, ptr::null());
                 return Err(Error::Vulkan(format!(
-                    "Failed to bind descriptor buffer memory: {:?}",
+                    "Failed to bind buffer memory: {:?}",
                     result
                 )));
             }
 
-            let mut mapped_ptr: *mut std::ffi::c_void = ptr::null_mut();
-            let result =
-                crate::vkMapMemory(self.device, memory, 0, aligned_size, 0, &mut mapped_ptr);
-            if result != crate::VkResult::VK_SUCCESS {
-                crate::vkDestroyBuffer(self.device, buffer, ptr::null());
-                crate::vkFreeMemory(self.device, memory, ptr::null());
-                return Err(Error::Vulkan(format!(
-                    "Failed to map descriptor buffer memory: {:?}",
-                    result
-                )));
-            }
+            let cpu_ptr = if memory_type == MemoryType::CpuMapped
+                || memory_type == MemoryType::CpuCached
+            {
+                let mut mapped_ptr: *mut std::ffi::c_void = ptr::null_mut();
+                let result =
+                    crate::vkMapMemory(self.device, memory, 0, aligned_size, 0, &mut mapped_ptr);
+                if result != crate::VkResult::VK_SUCCESS {
+                    crate::vkDestroyBuffer(self.device, buffer, ptr::null());
+                    crate::vkFreeMemory(self.device, memory, ptr::null());
+                    return Err(Error::Vulkan(format!("Failed to map memory: {:?}", result)));
+                }
+                mapped_ptr as *mut u8
+            } else {
+                ptr::null_mut()
+            };
 
             let addr_info = crate::VkBufferDeviceAddressInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
@@ -688,12 +527,55 @@ impl GraphicsContext {
             Ok(GpuAllocation {
                 buffer,
                 memory,
-                cpu_ptr: mapped_ptr as *mut u8,
+                cpu_ptr,
                 gpu_ptr: device_address,
-                size: size,
+                size,
                 device: self.device,
             })
         }
+    }
+
+    /// Allocate GPU memory with specified size, alignment and type.
+    ///
+    /// The buffer is created with TRANSFER_SRC | TRANSFER_DST | STORAGE_BUFFER |
+    /// SHADER_DEVICE_ADDRESS usage flags, making it suitable for general-purpose data.
+    pub fn gpu_malloc(
+        &self,
+        size: usize,
+        alignment: usize,
+        memory_type: MemoryType,
+    ) -> Result<GpuAllocation> {
+        let usage = (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_SRC_BIT as u32)
+            | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT as u32)
+            | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT as u32)
+            | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_STORAGE_BUFFER_BIT as u32);
+        self.gpu_malloc_internal(size, alignment, memory_type, usage)
+    }
+
+    /// Simplified gpu_malloc for common case (CPU-mapped, 16-byte aligned)
+    pub fn gpu_malloc_simple<T>(&self, count: usize) -> Result<GpuAllocation> {
+        let size = std::mem::size_of::<T>() * count;
+        let alignment = std::mem::align_of::<T>();
+        self.gpu_malloc(size, alignment, MemoryType::CpuMapped)
+    }
+
+    /// Allocate a descriptor buffer (VK_EXT_descriptor_buffer) suitable for binding with
+    /// `VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT`.
+    ///
+    /// This is needed for `TextureDescriptorHeap` to pass validation when binding via
+    /// `vkCmdBindDescriptorBuffersEXT`.
+    pub fn gpu_malloc_descriptor_buffer(
+        &self,
+        size: usize,
+        alignment: usize,
+    ) -> Result<GpuAllocation> {
+        if !self.descriptor_buffer_supported() {
+            return Err(Error::Unsupported);
+        }
+        let usage = (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
+            as u32)
+            | (crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT as u32);
+        self.gpu_malloc_internal(size, alignment, MemoryType::CpuMapped, usage)
     }
 
     /// Create a buffer and upload data efficiently.
@@ -1055,7 +937,7 @@ impl GraphicsContext {
                 },
             };
 
-            let result = crate::vkQueueSubmit(self._graphics_queue, 1, &submit_info, fence);
+            let result = crate::vkQueueSubmit(self.graphics_queue, 1, &submit_info, fence);
             if result != crate::VkResult::VK_SUCCESS {
                 crate::vkDestroyFence(self.device, fence, ptr::null());
                 return Err(Error::Vulkan(format!(
@@ -1116,7 +998,7 @@ impl GraphicsContext {
                 },
             };
 
-            let result = crate::vkQueueSubmit(self._graphics_queue, 1, &submit_info, fence);
+            let result = crate::vkQueueSubmit(self.graphics_queue, 1, &submit_info, fence);
             if result != crate::VkResult::VK_SUCCESS {
                 return Err(Error::Vulkan(format!(
                     "Failed to submit command buffer with fence: {:?}",
@@ -2570,7 +2452,7 @@ impl TextureDescriptorHeap {
                 pNext: &mut properties as *mut _ as *mut std::ffi::c_void,
                 properties: std::mem::zeroed(),
             };
-            crate::vkGetPhysicalDeviceProperties2(context._physical_device, &mut props2);
+            crate::vkGetPhysicalDeviceProperties2(context.physical_device, &mut props2);
         }
 
         let descriptor_size = properties.combinedImageSamplerDescriptorSize as usize;
@@ -2927,33 +2809,17 @@ impl GraphicsPipeline {
                 primitiveRestartEnable: 0,
             };
 
-            // Viewport and scissor
-            let viewport = crate::VkViewport {
-                x: 0.0,
-                y: 0.0,
-                width: 800.0,
-                height: 600.0,
-                minDepth: 0.0,
-                maxDepth: 1.0,
-            };
-
-            let scissor = crate::VkRect2D {
-                offset: crate::VkOffset2D { x: 0, y: 0 },
-                extent: crate::VkExtent2D {
-                    width: 800,
-                    height: 600,
-                },
-            };
-
+            // Viewport and scissor are set dynamically per-frame via vkCmdSetViewport /
+            // vkCmdSetScissor, so the static values here are never used by the driver.
             let viewport_state = crate::VkPipelineViewportStateCreateInfo {
                 sType:
                     crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
                 viewportCount: 1,
-                pViewports: &viewport,
+                pViewports: ptr::null(), // ignored — VK_DYNAMIC_STATE_VIEWPORT
                 scissorCount: 1,
-                pScissors: &scissor,
+                pScissors: ptr::null(), // ignored — VK_DYNAMIC_STATE_SCISSOR
             };
 
             // Rasterization
@@ -3016,21 +2882,27 @@ impl GraphicsPipeline {
                 blendConstants: [0.0, 0.0, 0.0, 0.0],
             };
 
-            // Dynamic state: scissor rect (set per-draw for egui clip regions)
-            let dynamic_states = [crate::VkDynamicState::VK_DYNAMIC_STATE_SCISSOR];
+            // Viewport is always dynamic; scissor is dynamic when requested (e.g. for egui
+            // clip regions).  The static viewport values in VkPipelineViewportStateCreateInfo
+            // are ignored when the state is dynamic, so no dummy structs are needed.
+            let dynamic_states_all = [
+                crate::VkDynamicState::VK_DYNAMIC_STATE_VIEWPORT,
+                crate::VkDynamicState::VK_DYNAMIC_STATE_SCISSOR,
+            ];
+            let dynamic_states_viewport_only = [crate::VkDynamicState::VK_DYNAMIC_STATE_VIEWPORT];
             let dynamic_state = crate::VkPipelineDynamicStateCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
                 dynamicStateCount: if dynamic_scissor {
-                    dynamic_states.len() as u32
+                    dynamic_states_all.len() as u32
                 } else {
-                    0
+                    dynamic_states_viewport_only.len() as u32
                 },
                 pDynamicStates: if dynamic_scissor {
-                    dynamic_states.as_ptr()
+                    dynamic_states_all.as_ptr()
                 } else {
-                    ptr::null()
+                    dynamic_states_viewport_only.as_ptr()
                 },
             };
 
@@ -3221,8 +3093,7 @@ impl Drop for ComputePipeline {
 /// Command buffer for recording rendering commands
 pub struct CommandBuffer {
     buffer: crate::VkCommandBuffer,
-    _device: crate::VkDevice,
-    _command_pool: crate::VkCommandPool,
+    device: crate::VkDevice,
 }
 
 impl CommandBuffer {
@@ -3234,7 +3105,7 @@ impl CommandBuffer {
             let alloc_info = crate::VkCommandBufferAllocateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                 pNext: ptr::null(),
-                commandPool: context._command_pool,
+                commandPool: context.command_pool,
                 level: crate::VkCommandBufferLevel::VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                 commandBufferCount: 1,
             };
@@ -3250,8 +3121,7 @@ impl CommandBuffer {
 
             Ok(CommandBuffer {
                 buffer,
-                _device: context.device,
-                _command_pool: context._command_pool,
+                device: context.device,
             })
         }
     }
@@ -3495,39 +3365,6 @@ impl CommandBuffer {
         }
     }
 
-    /// Copy buffer data to texture with automatic layout transitions
-    /// This handles the optimal upload path with DCC compression support
-    pub fn copy_to_texture(
-        &self,
-        src_data: &[u8],
-        dst_texture: &Texture,
-        width: u32,
-        height: u32,
-        format: Format,
-    ) -> Result<()> {
-        // Calculate required buffer size
-        let pixel_size = match format {
-            Format::Rgba8Unorm | Format::Bgra8Unorm => 4,
-            Format::Rgba32Float => 16,
-            Format::Depth32Float => 4,
-        };
-
-        let required_size = (width as usize) * (height as usize) * pixel_size;
-        if src_data.len() < required_size {
-            return Err(Error::InvalidArgument);
-        }
-
-        // Transition texture to TRANSFER_DST_OPTIMAL
-        self.transition_to_transfer_dst(dst_texture);
-
-        // Create staging buffer
-        // Note: In a real implementation, we would use a staging buffer pool
-        // For simplicity, we create a new allocation each time
-        println!("Texture upload with DCC compression not yet implemented - using simple copy");
-
-        Ok(())
-    }
-
     /// Copy buffer data to texture (texture must be in TRANSFER_DST_OPTIMAL layout)
     pub fn copy_buffer_to_texture(
         &self,
@@ -3613,6 +3450,18 @@ impl CommandBuffer {
                 &render_pass_begin,
                 crate::VkSubpassContents::VK_SUBPASS_CONTENTS_INLINE,
             );
+
+            // Set the full-framebuffer viewport automatically.  Callers can override with a
+            // subsequent vkCmdSetViewport call if they need a non-default viewport.
+            let viewport = crate::VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: height as f32,
+                minDepth: 0.0,
+                maxDepth: 1.0,
+            };
+            crate::vkCmdSetViewport(self.buffer, 0, 1, &viewport);
         }
     }
 
@@ -3716,71 +3565,6 @@ impl CommandBuffer {
         }
     }
 
-    /// Bind a descriptor heap for graphics or compute pipeline
-    /// Note: This is a placeholder implementation. Descriptor buffer extension
-    /// (VK_EXT_descriptor_buffer) is not universally supported. Use root arguments
-    /// and standard descriptor sets instead.
-    /// Bind a descriptor buffer to the command buffer
-    /// This enables bindless resource access via VK_EXT_descriptor_buffer
-    pub fn bind_descriptor_buffer(
-        &self,
-        heap: &DescriptorHeap,
-        _bind_point: crate::VkPipelineBindPoint,
-    ) {
-        unsafe {
-            let binding_info = crate::VkDescriptorBufferBindingInfoEXT {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-                pNext: ptr::null(),
-                address: heap.device_address(),
-                usage:
-                    crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT
-                        as u32,
-            };
-
-            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
-                self._device,
-                self.buffer,
-                1,
-                &binding_info,
-            );
-        }
-    }
-
-    /// Set the descriptor buffer offset for a specific set
-    /// Call this after bind_descriptor_buffer to select which descriptors to use
-    pub fn set_descriptor_buffer_offset(
-        &self,
-        layout: &PipelineLayout,
-        set_index: u32,
-        offset: u64,
-        bind_point: crate::VkPipelineBindPoint,
-    ) {
-        unsafe {
-            let buffer_index = 0u32; // We bind one descriptor buffer at a time
-            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
-                self._device,
-                self.buffer,
-                bind_point,
-                layout.vk_layout(),
-                set_index,
-                1,
-                &buffer_index,
-                &offset,
-            );
-        }
-    }
-
-    pub fn bind_descriptor_heap(
-        &self,
-        _heap: &DescriptorHeap,
-        _layout: &PipelineLayout,
-        _set_index: u32,
-        _bind_point: crate::VkPipelineBindPoint,
-    ) {
-        // Deprecated in favor of bind_descriptor_buffer
-        // This method is kept for backward compatibility
-    }
-
     /// Dispatch compute with root pointer
     pub fn dispatch(
         &self,
@@ -3823,127 +3607,55 @@ impl CommandBuffer {
         }
     }
 
-    /// Bind texture descriptor heap for bindless texturing (Graphics pipeline)
-    /// This enables VK_EXT_descriptor_buffer for texture sampling
-    pub fn bind_texture_heap_graphics(
-        &self,
-        heap: &TextureDescriptorHeap,
-        layout: &PipelineLayout,
-        set_index: u32,
-    ) {
-        unsafe {
-            let binding_info = crate::VkDescriptorBufferBindingInfoEXT {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-                pNext: ptr::null(),
-                address: heap.gpu_address(),
-                usage:
-                    crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
-                        as u32,
-            };
-
-            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
-                self._device,
-                self.buffer,
-                1,
-                &binding_info,
-            );
-
-            // Set the offset for this descriptor set
-            let buffer_index = 0u32;
-            let offset = 0u64;
-            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
-                self._device,
-                self.buffer,
-                crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
-                layout.vk_layout(),
-                set_index,
-                1,
-                &buffer_index,
-                &offset,
-            );
-        }
-    }
-
-    /// Bind texture descriptor heap for bindless texturing (Compute pipeline)
-    pub fn bind_texture_heap_compute(
-        &self,
-        heap: &TextureDescriptorHeap,
-        layout: &PipelineLayout,
-        set_index: u32,
-    ) {
-        unsafe {
-            let binding_info = crate::VkDescriptorBufferBindingInfoEXT {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
-                pNext: ptr::null(),
-                address: heap.gpu_address(),
-                usage:
-                    crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
-                        as u32,
-            };
-
-            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
-                self._device,
-                self.buffer,
-                1,
-                &binding_info,
-            );
-
-            // Set the offset for this descriptor set
-            let buffer_index = 0u32;
-            let offset = 0u64;
-            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
-                self._device,
-                self.buffer,
-                crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE,
-                layout.vk_layout(),
-                set_index,
-                1,
-                &buffer_index,
-                &offset,
-            );
-        }
-    }
-
-    /// Bind texture descriptor heap for bindless texturing
-    /// Sets the descriptor buffer for combined image samplers
-    /// Note: This is a conceptual implementation. In a real implementation,
-    /// we would use vkCmdBindDescriptorBuffersEXT and vkCmdSetDescriptorBufferOffsetsEXT.
+    /// Bind texture descriptor heap for bindless texturing.
+    ///
+    /// `bind_point` selects whether to bind for the graphics or compute pipeline.
+    /// Use `VK_PIPELINE_BIND_POINT_GRAPHICS` or `VK_PIPELINE_BIND_POINT_COMPUTE`.
     pub fn bind_texture_heap(
         &self,
         heap: &TextureDescriptorHeap,
-        _layout: &PipelineLayout,
+        layout: &PipelineLayout,
         set_index: u32,
+        bind_point: crate::VkPipelineBindPoint,
     ) {
-        println!(
-            "   [Conceptual] Binding texture heap at set {} with GPU address: 0x{:x}",
-            set_index,
-            heap.gpu_address()
-        );
-        // In a real implementation, we would:
-        // 1. Create VkDescriptorBufferBindingInfoEXT
-        // 2. Call vkCmdBindDescriptorBuffersEXT
-        // 3. Call vkCmdSetDescriptorBufferOffsetsEXT
-    }
-
-    /// Set root arguments for compute shader
-    /// Passes 64-bit pointer as two 32-bit integers (lo, hi)
-    pub fn set_compute_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
-        if layout.push_constant_size() >= 8 {
-            let addr = root_args.gpu_address();
-            let data = [
-                addr as u32,         // low 32 bits
-                (addr >> 32) as u32, // high 32 bits
-            ];
-            let data_bytes = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(&data))
+        unsafe {
+            let binding_info = crate::VkDescriptorBufferBindingInfoEXT {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT,
+                pNext: ptr::null(),
+                address: heap.gpu_address(),
+                usage:
+                    crate::VkBufferUsageFlagBits::VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT
+                        as u32,
             };
-            self.push_constants(layout, data_bytes);
+
+            let _ = vk_cmd_bind_descriptor_buffers_ext_dynamic(
+                self.device,
+                self.buffer,
+                1,
+                &binding_info,
+            );
+
+            // Set the offset for this descriptor set
+            let buffer_index = 0u32;
+            let offset = 0u64;
+            let _ = vk_cmd_set_descriptor_buffer_offsets_ext_dynamic(
+                self.device,
+                self.buffer,
+                bind_point,
+                layout.vk_layout(),
+                set_index,
+                1,
+                &buffer_index,
+                &offset,
+            );
         }
     }
 
-    /// Set root arguments for graphics pipeline
-    /// Passes 64-bit pointer as two 32-bit integers (lo, hi)
-    pub fn set_graphics_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
+    /// Set root arguments for a shader pipeline.
+    ///
+    /// Passes a 64-bit GPU pointer as two 32-bit push-constant integers (lo, hi).
+    /// Works for both graphics and compute pipelines.
+    pub fn set_root_arguments(&self, layout: &PipelineLayout, root_args: &RootArguments) {
         if layout.push_constant_size() >= 8 {
             let addr = root_args.gpu_address();
             let data = [
@@ -3960,167 +3672,6 @@ impl CommandBuffer {
     /// Get the Vulkan command buffer handle
     pub fn vk_buffer(&self) -> crate::VkCommandBuffer {
         self.buffer
-    }
-}
-
-/// Descriptor heap for bindless textures
-pub struct DescriptorHeap {
-    buffer: GpuAllocation,
-    descriptor_size: usize,
-    #[allow(dead_code)]
-    descriptor_alignment: usize,
-    count: usize,
-    capacity: usize,
-    device: crate::VkDevice,
-    image_views: Vec<crate::VkImageView>,
-}
-
-impl DescriptorHeap {
-    /// Create a new descriptor heap with given capacity
-    pub fn new(context: &GraphicsContext, capacity: usize) -> Result<Self> {
-        use std::ptr;
-
-        if !context.descriptor_buffer_supported() {
-            return Err(Error::Unsupported);
-        }
-
-        unsafe {
-            // Get descriptor buffer properties
-            let mut properties: crate::VkPhysicalDeviceDescriptorBufferPropertiesEXT =
-                std::mem::zeroed();
-            properties.sType = crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
-            properties.pNext = ptr::null_mut();
-
-            let mut properties2: crate::VkPhysicalDeviceProperties2 = std::mem::zeroed();
-            properties2.sType =
-                crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-            properties2.pNext = &mut properties as *mut _ as *mut std::ffi::c_void;
-
-            crate::vkGetPhysicalDeviceProperties2(context._physical_device, &mut properties2);
-
-            let descriptor_size = properties.combinedImageSamplerDescriptorSize as usize;
-            // Use the required alignment for descriptor buffer offsets
-            let descriptor_alignment = properties.descriptorBufferOffsetAlignment as usize;
-
-            // Create buffer for descriptor data
-            // We need host-visible memory for CPU updates
-            let buffer_size = descriptor_size * capacity;
-            let buffer =
-                context.gpu_malloc(buffer_size, descriptor_alignment, MemoryType::CpuMapped)?;
-
-            Ok(DescriptorHeap {
-                buffer,
-                descriptor_size,
-                descriptor_alignment,
-                count: 0,
-                capacity,
-                device: context.device,
-                image_views: Vec::new(),
-            })
-        }
-    }
-
-    /// Get the device address of the descriptor heap buffer
-    pub fn device_address(&self) -> u64 {
-        self.buffer.gpu_ptr
-    }
-
-    /// Add a texture to the heap and return its index
-    pub fn add_texture(&mut self, texture: &Texture, sampler: crate::VkSampler) -> Result<u32> {
-        if self.count >= self.capacity {
-            return Err(Error::OutOfMemory);
-        }
-
-        unsafe {
-            // Create image view for the texture
-            let view_info = crate::VkImageViewCreateInfo {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                pNext: ptr::null(),
-                flags: 0,
-                image: texture.image,
-                viewType: crate::VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
-                format: texture.format.to_vk_format(),
-                components: crate::VkComponentMapping {
-                    r: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
-                    g: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
-                    b: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
-                    a: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
-                },
-                subresourceRange: crate::VkImageSubresourceRange {
-                    aspectMask: crate::VkImageAspectFlagBits::VK_IMAGE_ASPECT_COLOR_BIT as u32,
-                    baseMipLevel: 0,
-                    levelCount: 1,
-                    baseArrayLayer: 0,
-                    layerCount: 1,
-                },
-            };
-
-            let mut image_view: crate::VkImageView = ptr::null_mut();
-            let result =
-                crate::vkCreateImageView(self.device, &view_info, ptr::null(), &mut image_view);
-            if result != crate::VkResult::VK_SUCCESS {
-                return Err(Error::Vulkan(format!(
-                    "Failed to create image view: {:?}",
-                    result
-                )));
-            }
-
-            // Store image view for cleanup
-            self.image_views.push(image_view);
-
-            // Create descriptor image info
-            let image_info = crate::VkDescriptorImageInfo {
-                sampler,
-                imageView: image_view,
-                imageLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            };
-
-            // Write descriptor to buffer
-            let descriptor_info = crate::VkDescriptorGetInfoEXT {
-                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
-                pNext: ptr::null(),
-                type_: crate::VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                data: crate::VkDescriptorDataEXT {
-                    pCombinedImageSampler: &image_info as *const _,
-                },
-            };
-
-            let offset = self.count * self.descriptor_size;
-            let dest_ptr = self.buffer.cpu_ptr.add(offset) as *mut std::ffi::c_void;
-
-            if !vk_get_descriptor_ext_dynamic(
-                self.device,
-                &descriptor_info,
-                self.descriptor_size,
-                dest_ptr,
-            ) {
-                crate::vkDestroyImageView(self.device, image_view, ptr::null());
-                return Err(Error::Unsupported);
-            }
-
-            // Store image view for cleanup
-            // TODO: Store image view for later destruction
-            // For now, we leak it (in real implementation, store it)
-
-            let index = self.count as u32;
-            self.count += 1;
-            Ok(index)
-        }
-    }
-
-    /// Get GPU address of the descriptor heap
-    pub fn gpu_address(&self) -> u64 {
-        self.buffer.gpu_ptr
-    }
-
-    /// Get descriptor size (for shader indexing)
-    pub fn descriptor_size(&self) -> usize {
-        self.descriptor_size
-    }
-
-    /// Get current count of descriptors in the heap
-    pub fn count(&self) -> usize {
-        self.count
     }
 }
 
@@ -4172,7 +3723,7 @@ impl Swapchain {
             let mut capabilities =
                 std::mem::MaybeUninit::<crate::VkSurfaceCapabilitiesKHR>::zeroed();
             let result = crate::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-                context._physical_device,
+                context.physical_device,
                 surface,
                 capabilities.as_mut_ptr(),
             );
@@ -4187,7 +3738,7 @@ impl Swapchain {
             // Choose swapchain format
             let mut format_count = 0;
             let result = crate::vkGetPhysicalDeviceSurfaceFormatsKHR(
-                context._physical_device,
+                context.physical_device,
                 surface,
                 &mut format_count,
                 ptr::null_mut(),
@@ -4201,7 +3752,7 @@ impl Swapchain {
 
             let mut formats = Vec::with_capacity(format_count as usize);
             let result = crate::vkGetPhysicalDeviceSurfaceFormatsKHR(
-                context._physical_device,
+                context.physical_device,
                 surface,
                 &mut format_count,
                 formats.as_mut_ptr(),
@@ -4230,7 +3781,7 @@ impl Swapchain {
             // Choose present mode (FIFO is always available)
             let mut present_mode_count = 0;
             let result = crate::vkGetPhysicalDeviceSurfacePresentModesKHR(
-                context._physical_device,
+                context.physical_device,
                 surface,
                 &mut present_mode_count,
                 ptr::null_mut(),
@@ -4244,7 +3795,7 @@ impl Swapchain {
 
             let mut present_modes = Vec::with_capacity(present_mode_count as usize);
             let result = crate::vkGetPhysicalDeviceSurfacePresentModesKHR(
-                context._physical_device,
+                context.physical_device,
                 surface,
                 &mut present_mode_count,
                 present_modes.as_mut_ptr(),
@@ -4709,9 +4260,9 @@ impl Swapchain {
             // If supported we can use a present-fence path and avoid allocating per-image semaphores.
             let mut ext_count: u32 = 0;
             let mut support_swapchain_maintenance1 = false;
-            unsafe {
+            {
                 let mut result = crate::vkEnumerateDeviceExtensionProperties(
-                    context._physical_device,
+                    context.physical_device,
                     std::ptr::null(),
                     &mut ext_count,
                     std::ptr::null_mut(),
@@ -4720,7 +4271,7 @@ impl Swapchain {
                     let mut exts: Vec<crate::VkExtensionProperties> =
                         Vec::with_capacity(ext_count as usize);
                     result = crate::vkEnumerateDeviceExtensionProperties(
-                        context._physical_device,
+                        context.physical_device,
                         std::ptr::null(),
                         &mut ext_count,
                         exts.as_mut_ptr(),
@@ -4768,8 +4319,8 @@ impl Swapchain {
                 format,
                 extent,
                 device: context.device,
-                graphics_queue: context._graphics_queue,
-                present_queue: context._present_queue,
+                graphics_queue: context.graphics_queue,
+                present_queue: context.present_queue,
                 // Whether the maintenance1 present-fence path is available on this device
                 support_swapchain_maintenance1,
 
@@ -5017,18 +4568,6 @@ impl Drop for Swapchain {
             }
 
             crate::vkDestroySwapchainKHR(self.device, self.swapchain, std::ptr::null());
-        }
-    }
-}
-
-impl Drop for DescriptorHeap {
-    fn drop(&mut self) {
-        unsafe {
-            // Destroy image views
-            for &image_view in &self.image_views {
-                crate::vkDestroyImageView(self.device, image_view, std::ptr::null());
-            }
-            // Buffer is freed by GpuAllocation's Drop
         }
     }
 }

@@ -308,9 +308,14 @@ fn main() -> Result<(), String> {
         cmd.begin()
             .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
 
-        // Bind texture heap (conceptual - descriptor buffer extension not universally available)
-        cmd.bind_texture_heap(&texture_heap, &pipeline_layout, 0);
-        cmd.set_graphics_root_arguments(&pipeline_layout, &root_args);
+        // Bind texture heap for bindless texturing (graphics pipeline)
+        cmd.bind_texture_heap(
+            &texture_heap,
+            &pipeline_layout,
+            0,
+            rust_and_vulkan::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+        );
+        cmd.set_root_arguments(&pipeline_layout, &root_args);
 
         cmd.end()
             .map_err(|e| format!("Failed to end command buffer: {}", e))?;

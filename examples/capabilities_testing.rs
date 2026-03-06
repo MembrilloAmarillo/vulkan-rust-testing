@@ -674,7 +674,7 @@ fn main() -> Result<(), String> {
             })
             .map_err(|e| format!("Failed writing cube root args: {}", e))?;
 
-        cmd.set_graphics_root_arguments(&layout_3d, &root3d[frame_idx]);
+        cmd.set_root_arguments(&layout_3d, &root3d[frame_idx]);
         cmd.bind_index_buffer(&cube_ib, 0, IndexType::U32);
         cmd.draw_indexed(cube_indices.len() as u32, 1, 0, 0, 0);
         //cmd.draw(36, 1, 0, 0);
@@ -693,7 +693,7 @@ fn main() -> Result<(), String> {
             })
             .map_err(|e| format!("Failed writing sphere root args: {}", e))?;
 
-        cmd.set_graphics_root_arguments(&layout_3d, &root3d[frame_idx]);
+        cmd.set_root_arguments(&layout_3d, &root3d[frame_idx]);
         cmd.bind_index_buffer(&sphere_ib, 0, IndexType::U32);
         cmd.draw_indexed(sphere_indices.len() as u32, 1, 0, 0, 0);
 
@@ -713,7 +713,7 @@ fn main() -> Result<(), String> {
             })
             .map_err(|e| format!("Failed writing 2D root args: {}", e))?;
 
-        cmd.set_graphics_root_arguments(&layout_2d, &root2d[frame_idx]);
+        cmd.set_root_arguments(&layout_2d, &root2d[frame_idx]);
         cmd.bind_index_buffer(&tri_ib, 0, IndexType::U32);
         cmd.draw_indexed(triangle_indices.len() as u32, 1, 0, 0, 0);
 

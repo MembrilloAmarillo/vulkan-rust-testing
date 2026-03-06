@@ -142,12 +142,17 @@ fn main() -> Result<(), String> {
     cmd.begin()
         .map_err(|e| format!("Failed to begin command buffer: {}", e))?;
 
-    // Bind texture heap (set 0 for bindless textures)
-    cmd.bind_texture_heap(&texture_heap, &pipeline_layout, 0);
+    // Bind texture heap for bindless texturing (graphics pipeline, set 0)
+    cmd.bind_texture_heap(
+        &texture_heap,
+        &pipeline_layout,
+        0,
+        rust_and_vulkan::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+    );
     println!("   Texture heap bound to set 0.");
 
     // Set root arguments
-    cmd.set_graphics_root_arguments(&pipeline_layout, &root_args);
+    cmd.set_root_arguments(&pipeline_layout, &root_args);
     println!("   Root arguments set via push constants.");
 
     // Note: In a complete implementation, we would:

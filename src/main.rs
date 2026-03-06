@@ -310,7 +310,12 @@ fn main() -> Result<(), String> {
         // Bind bindless texture heap (descriptor buffer) at set=0.
         // This requires a pipeline created with VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT.
         if let Some(ref heap) = bindless_heap {
-            cmd.bind_texture_heap_graphics(heap, &layout, 0);
+            cmd.bind_texture_heap(
+                heap,
+                &layout,
+                0,
+                rust_and_vulkan::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+            );
         } else {
             // If bindless isn't available, we currently don't draw.
             // (You can extend this later to build a descriptor-set-compatible pipeline layout.)

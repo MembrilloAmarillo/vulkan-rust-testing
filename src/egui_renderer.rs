@@ -312,7 +312,12 @@ impl EguiRenderer {
         cmd.bind_pipeline(&self.pipeline);
 
         // Bind font texture heap via descriptor buffer (set=0)
-        cmd.bind_texture_heap_graphics(&self.font_heap, &self.layout, 0);
+        cmd.bind_texture_heap(
+            &self.font_heap,
+            &self.layout,
+            0,
+            crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+        );
 
         let pc = UIPushConstants {
             vertex_ptr: self.vertex_buffer.as_ref().unwrap().device_address(),
