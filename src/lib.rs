@@ -71,6 +71,13 @@ pub fn VK_MAKE_VERSION(major: u32, minor: u32, patch: u32) -> u32 {
 // Simple API module
 pub mod simple;
 
+// egui integration
+pub mod egui_manager;
+pub mod egui_renderer;
+
+pub use egui_manager::EguiManager;
+pub use egui_renderer::EguiRenderer;
+
 pub struct SdlContext {
     _private: (),
 }
@@ -288,6 +295,7 @@ pub struct VulkanDevice {
     pub present_queue: crate::VkQueue,
     pub command_pool: crate::VkCommandPool,
     pub instance: VulkanInstance,
+    pub descriptor_buffer_supported: bool,
 }
 
 impl VulkanDevice {
@@ -383,6 +391,67 @@ impl VulkanDevice {
             };
             eprintln!("Present queue family index: {}", present_queue_family_index);
 
+            let mut extension_count = 0;
+            let result = crate::vkEnumerateDeviceExtensionProperties(
+                physical_device,
+                std::ptr::null(),
+                &mut extension_count,
+                std::ptr::null_mut(),
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(format!(
+                    "Failed to enumerate device extensions: {:?}",
+                    result
+                ));
+            }
+            let mut extension_properties = Vec::with_capacity(extension_count as usize);
+            if extension_count > 0 {
+                let enumerate_result = crate::vkEnumerateDeviceExtensionProperties(
+                    physical_device,
+                    std::ptr::null(),
+                    &mut extension_count,
+                    extension_properties.as_mut_ptr(),
+                );
+                if enumerate_result != crate::VkResult::VK_SUCCESS {
+                    return Err(format!(
+                        "Failed to enumerate device extensions: {:?}",
+                        enumerate_result
+                    ));
+                }
+                extension_properties.set_len(extension_count as usize);
+            }
+            let mut descriptor_buffer_extension_available = false;
+            for ext in &extension_properties {
+                let name = std::ffi::CStr::from_ptr(ext.extensionName.as_ptr() as *const c_char);
+                if name.to_bytes() == b"VK_EXT_descriptor_buffer" {
+                    descriptor_buffer_extension_available = true;
+                    break;
+                }
+            }
+
+            let mut descriptor_buffer_features_query =
+                crate::VkPhysicalDeviceDescriptorBufferFeaturesEXT {
+                    sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+                    pNext: std::ptr::null_mut(),
+                    descriptorBuffer: 0,
+                    descriptorBufferCaptureReplay: 0,
+                    descriptorBufferImageLayoutIgnored: 0,
+                    descriptorBufferPushDescriptors: 0,
+                };
+            let mut features2 = crate::VkPhysicalDeviceFeatures2 {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                pNext: &mut descriptor_buffer_features_query as *mut _ as *mut libc::c_void,
+                features: std::mem::zeroed(),
+            };
+            crate::vkGetPhysicalDeviceFeatures2(physical_device, &mut features2);
+
+            let descriptor_buffer_supported = descriptor_buffer_extension_available
+                && descriptor_buffer_features_query.descriptorBuffer != 0;
+            let descriptor_buffer_capture_replay = descriptor_buffer_supported
+                && descriptor_buffer_features_query.descriptorBufferCaptureReplay != 0;
+            let descriptor_buffer_image_layout_ignored = descriptor_buffer_supported
+                && descriptor_buffer_features_query.descriptorBufferImageLayoutIgnored != 0;
+
             // Create logical device
             eprintln!("Creating logical device...");
             let queue_priorities = [1.0f32];
@@ -415,6 +484,10 @@ impl VulkanDevice {
             if surface.is_some() {
                 enabled_extensions.push(b"VK_KHR_swapchain\0".as_ptr() as *const i8);
             }
+            if descriptor_buffer_supported {
+                enabled_extensions.push(b"VK_EXT_descriptor_buffer\0".as_ptr() as *const i8);
+                enabled_extensions.push(b"VK_KHR_synchronization2\0".as_ptr() as *const i8);
+            }
             // Buffer device address is part of Vulkan 1.2+ core
             // (no longer need this extension for newer drivers)
             eprintln!("Enabled device extensions:");
@@ -431,12 +504,37 @@ impl VulkanDevice {
             vulkan12_features.sType =
                 crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
             vulkan12_features.pNext = std::ptr::null_mut();
+
+            // Already required by your buffer-device-address + scalar block layout shaders.
             vulkan12_features.bufferDeviceAddress = 1;
             vulkan12_features.scalarBlockLayout = 1;
 
+            // Required for bindless-style `sampler2D textures[];` runtime arrays and non-uniform indexing.
+            // These satisfy validation errors like:
+            // - Capability RuntimeDescriptorArray -> VkPhysicalDeviceVulkan12Features::runtimeDescriptorArray
+            // - Capability SampledImageArrayNonUniformIndexing -> VkPhysicalDeviceVulkan12Features::shaderSampledImageArrayNonUniformIndexing
+            vulkan12_features.descriptorIndexing = 1;
+            vulkan12_features.runtimeDescriptorArray = 1;
+            vulkan12_features.shaderSampledImageArrayNonUniformIndexing = 1;
+
+            let mut descriptor_buffer_features_enable =
+                crate::VkPhysicalDeviceDescriptorBufferFeaturesEXT {
+                    sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT,
+                    pNext: &mut vulkan12_features as *mut _ as *mut libc::c_void,
+                    descriptorBuffer: if descriptor_buffer_supported { crate::VK_TRUE } else { 0 },
+                    descriptorBufferCaptureReplay: if descriptor_buffer_capture_replay { crate::VK_TRUE } else { 0 },
+                    descriptorBufferImageLayoutIgnored: if descriptor_buffer_image_layout_ignored { crate::VK_TRUE } else { 0 },
+                    descriptorBufferPushDescriptors: 0,
+                };
+            let feature_chain = if descriptor_buffer_supported {
+                &mut descriptor_buffer_features_enable as *mut _ as *mut libc::c_void
+            } else {
+                &mut vulkan12_features as *mut _ as *mut libc::c_void
+            };
+
             let device_create_info = crate::VkDeviceCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                pNext: &mut vulkan12_features as *mut _ as *mut libc::c_void,
+                pNext: feature_chain,
                 flags: 0,
                 queueCreateInfoCount: queue_create_infos.len() as u32,
                 pQueueCreateInfos: queue_create_infos.as_ptr(),
@@ -499,6 +597,7 @@ impl VulkanDevice {
                 present_queue,
                 command_pool,
                 instance,
+                descriptor_buffer_supported,
             })
         }
     }
@@ -511,6 +610,7 @@ impl VulkanDevice {
             self.graphics_queue,
             self.present_queue,
             self.command_pool,
+            self.descriptor_buffer_supported,
         )
     }
 }
