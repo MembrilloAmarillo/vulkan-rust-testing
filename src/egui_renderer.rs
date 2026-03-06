@@ -1,14 +1,14 @@
-//! egui Vulkan renderer using device addresses.
+//! egui Vulkan renderer using device addresses and descriptor-buffer bindless textures.
 //!
 //! Converts egui tessellated output into Vulkan draw calls.
-//! Uses device address buffers for vertex/index data, and a traditional
-//! descriptor set for the font texture (combined-image-sampler at set=0, binding=0).
+//! Uses device address buffers for vertex/index data, and a `TextureDescriptorHeap`
+//! for the font texture (compatible with VK_EXT_descriptor_buffer pipelines).
 
 use egui::ClippedPrimitive;
 
 use crate::simple::{
-    Buffer, BufferUsage, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
-    GraphicsContext, GraphicsPipeline, MemoryType, PipelineLayout, ShaderModule, Texture,
+    Buffer, BufferUsage, CommandBuffer, DescriptorSetLayout, Format, GraphicsContext,
+    GraphicsPipeline, MemoryType, PipelineLayout, ShaderModule, Texture, TextureDescriptorHeap,
     TextureUsage,
 };
 
@@ -20,32 +20,54 @@ struct UIVertex {
     color: u32, // pre-multiplied sRGB packed as ABGR (little-endian RGBA)
 }
 
-/// Push constants: vertex buffer device address + screen size (16 bytes total).
+/// Push constants for the egui pipeline (20 bytes, same layout in both shaders).
+///
+/// Layout (std430):
+///   offset  0: vertex_ptr    (u64, 8 bytes)
+///   offset  8: window_width  (f32, 4 bytes)
+///   offset 12: window_height (f32, 4 bytes)
+///   offset 16: texture_index (u32, 4 bytes)
+///   total: 20 bytes
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UIPushConstants {
     vertex_ptr: u64,    // 8 bytes
     window_width: f32,  // 4 bytes
     window_height: f32, // 4 bytes
+    texture_index: u32, // 4 bytes — bindless heap index for font atlas
+}
+
+/// One scissored draw call produced by `prepare()` and consumed by `render()`.
+#[derive(Clone, Copy)]
+struct DrawCall {
+    /// First index in the index buffer.
+    first_index: u32,
+    /// Number of indices to draw.
+    index_count: u32,
+    /// Scissor rect in screen-space pixels (already clamped to the viewport).
+    scissor_x: i32,
+    scissor_y: i32,
+    scissor_w: u32,
+    scissor_h: u32,
 }
 
 pub struct EguiRenderer {
     pipeline: GraphicsPipeline,
     layout: PipelineLayout,
     device: crate::VkDevice,
-    // Font texture + descriptor
+    // Font texture + bindless descriptor heap
     font_texture: Option<Texture>,
     font_sampler: crate::VkSampler,
-    descriptor_pool: DescriptorPool,
-    descriptor_set_layout: DescriptorSetLayout,
-    descriptor_set: Option<DescriptorSet>,
+    font_heap: TextureDescriptorHeap,
+    font_texture_index: u32,
+    font_heap_written: bool,
     // Geometry buffers
     vertex_buffer: Option<Buffer>,
     index_buffer: Option<Buffer>,
-    vertex_count: usize,
-    index_count: usize,
     vertex_capacity: usize,
     index_capacity: usize,
+    // Per-primitive draw calls (populated by prepare, consumed by render)
+    draws: Vec<DrawCall>,
 }
 
 impl EguiRenderer {
@@ -60,28 +82,20 @@ impl EguiRenderer {
         let vs = ShaderModule::new(context, &vert_spv).map_err(|e| e.to_string())?;
         let fs = ShaderModule::new(context, &frag_spv).map_err(|e| e.to_string())?;
 
-        // Descriptor set layout: set=0, binding=0 = combined image sampler (font atlas)
-        let descriptor_set_layout =
-            DescriptorSetLayout::new_texture_array(context, 1).map_err(|e| e.to_string())?;
+        // Descriptor set layout: bindless combined-image-sampler array (descriptor-buffer compatible).
+        let set_layout =
+            DescriptorSetLayout::new_bindless_textures(context, 1).map_err(|e| e.to_string())?;
 
-        // Descriptor pool: capacity for 1 set, 1 combined-image-sampler
-        let descriptor_pool = DescriptorPool::new(context, 1, 1).map_err(|e| e.to_string())?;
-
-        // Pipeline layout: descriptor set 0 + push constants.
-        // We borrow descriptor_set_layout by reference; it remains valid after this call.
-        let set_layouts = [descriptor_set_layout];
+        // Pipeline layout: descriptor set 0 + push constants (20 bytes).
         let layout = PipelineLayout::with_descriptor_set_layouts_and_push_size(
             context,
-            &set_layouts,
+            &[set_layout],
             crate::simple::SHADER_STAGE_VERTEX | crate::simple::SHADER_STAGE_FRAGMENT,
             std::mem::size_of::<UIPushConstants>() as u32,
         )
         .map_err(|e| e.to_string())?;
-        // Destructure the array to reclaim ownership
-        let [descriptor_set_layout] = set_layouts;
 
-        // Create alpha-blend pipeline (also sets VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
-        // to be compatible with the descriptor-buffer scene pipeline in the same command buffer).
+        // Alpha-blend pipeline with VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT.
         let pipeline = GraphicsPipeline::new_with_blend_descriptor_buffer(
             context,
             &vs,
@@ -99,21 +113,24 @@ impl EguiRenderer {
             .create_default_sampler()
             .map_err(|e| e.to_string())?;
 
+        // Descriptor heap: capacity 1 (only the font atlas).
+        let mut font_heap = TextureDescriptorHeap::new(context, 1).map_err(|e| e.to_string())?;
+        let font_texture_index = font_heap.allocate().map_err(|e| e.to_string())?;
+
         Ok(EguiRenderer {
             pipeline,
             layout,
             device: context.vk_device(),
             font_texture: None,
             font_sampler,
-            descriptor_pool,
-            descriptor_set_layout,
-            descriptor_set: None,
+            font_heap,
+            font_texture_index,
+            font_heap_written: false,
             vertex_buffer: None,
             index_buffer: None,
-            vertex_count: 0,
-            index_count: 0,
             vertex_capacity: 0,
             index_capacity: 0,
+            draws: Vec::new(),
         })
     }
 
@@ -149,20 +166,16 @@ impl EguiRenderer {
                 )
                 .map_err(|e| e.to_string())?;
 
-            // Write descriptor (only allocate once — the pool holds capacity for 1 set)
-            if self.descriptor_set.is_none() {
-                let ds = self
-                    .descriptor_pool
-                    .allocate(&self.descriptor_set_layout)
-                    .map_err(|e| e.to_string())?;
-                ds.write_textures(context, &[&texture], self.font_sampler)
-                    .map_err(|e| e.to_string())?;
-                self.descriptor_set = Some(ds);
-            } else if let Some(ref ds) = self.descriptor_set {
-                // Re-write the existing descriptor set to point at the new texture
-                ds.write_textures(context, &[&texture], self.font_sampler)
-                    .map_err(|e| e.to_string())?;
-            }
+            // Write (or re-write) the descriptor in the heap.
+            self.font_heap
+                .write_descriptor(
+                    context,
+                    self.font_texture_index,
+                    &texture,
+                    self.font_sampler,
+                )
+                .map_err(|e| e.to_string())?;
+            self.font_heap_written = true;
 
             self.font_texture = Some(texture);
         }
@@ -174,14 +187,26 @@ impl EguiRenderer {
         &mut self,
         context: &GraphicsContext,
         clipped_primitives: Vec<ClippedPrimitive>,
+        screen_width: f32,
+        screen_height: f32,
     ) -> Result<(), String> {
         let mut vertices: Vec<UIVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
+        self.draws.clear();
 
-        for ClippedPrimitive { primitive, .. } in clipped_primitives {
+        for ClippedPrimitive {
+            primitive,
+            clip_rect,
+        } in clipped_primitives
+        {
             match primitive {
                 egui::epaint::Primitive::Mesh(mesh) => {
+                    if mesh.indices.is_empty() {
+                        continue;
+                    }
+
                     let index_offset = vertices.len() as u32;
+                    let first_index = indices.len() as u32;
 
                     for vertex in &mesh.vertices {
                         let [r, g, b, a] = vertex.color.to_srgba_unmultiplied();
@@ -205,13 +230,27 @@ impl EguiRenderer {
                     for index in &mesh.indices {
                         indices.push(index_offset + index);
                     }
+
+                    // Clamp clip_rect to the viewport and convert to integer pixels.
+                    let x0 = clip_rect.min.x.max(0.0).floor() as i32;
+                    let y0 = clip_rect.min.y.max(0.0).floor() as i32;
+                    let x1 = clip_rect.max.x.min(screen_width).ceil() as i32;
+                    let y1 = clip_rect.max.y.min(screen_height).ceil() as i32;
+                    let w = (x1 - x0).max(0) as u32;
+                    let h = (y1 - y0).max(0) as u32;
+
+                    self.draws.push(DrawCall {
+                        first_index,
+                        index_count: mesh.indices.len() as u32,
+                        scissor_x: x0,
+                        scissor_y: y0,
+                        scissor_w: w,
+                        scissor_h: h,
+                    });
                 }
                 egui::epaint::Primitive::Callback(_) => {}
             }
         }
-
-        self.vertex_count = vertices.len();
-        self.index_count = indices.len();
 
         if !vertices.is_empty() {
             let needed = vertices.len() * std::mem::size_of::<UIVertex>();
@@ -262,35 +301,24 @@ impl EguiRenderer {
         screen_width: f32,
         screen_height: f32,
     ) -> Result<(), String> {
-        if self.vertex_buffer.is_none() || self.index_buffer.is_none() || self.index_count == 0 {
+        if self.vertex_buffer.is_none() || self.index_buffer.is_none() || self.draws.is_empty() {
             return Ok(());
         }
 
-        let Some(ref ds) = self.descriptor_set else {
-            // Font texture not yet uploaded — nothing to draw
+        if !self.font_heap_written {
             return Ok(());
-        };
+        }
 
         cmd.bind_pipeline(&self.pipeline);
 
-        // Bind font texture (set=0, binding=0)
-        unsafe {
-            crate::vkCmdBindDescriptorSets(
-                cmd.vk_buffer(),
-                crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
-                self.layout.vk_layout(),
-                0,
-                1,
-                &ds.vk_set(),
-                0,
-                std::ptr::null(),
-            );
-        }
+        // Bind font texture heap via descriptor buffer (set=0)
+        cmd.bind_texture_heap_graphics(&self.font_heap, &self.layout, 0);
 
         let pc = UIPushConstants {
             vertex_ptr: self.vertex_buffer.as_ref().unwrap().device_address(),
             window_width: screen_width,
             window_height: screen_height,
+            texture_index: self.font_texture_index,
         };
         cmd.push_constants(&self.layout, as_bytes(std::slice::from_ref(&pc)));
 
@@ -299,7 +327,17 @@ impl EguiRenderer {
             0,
             crate::simple::IndexType::U32,
         );
-        cmd.draw_indexed(self.index_count as u32, 1, 0, 0, 0);
+
+        // Issue one draw call per clipped primitive with its scissor rect.
+        for draw in &self.draws {
+            cmd.set_scissor(
+                draw.scissor_x,
+                draw.scissor_y,
+                draw.scissor_w,
+                draw.scissor_h,
+            );
+            cmd.draw_indexed(draw.index_count, 1, draw.first_index, 0, 0);
+        }
 
         Ok(())
     }

@@ -2769,6 +2769,7 @@ impl GraphicsPipeline {
             0, // no special pipeline create flags
             false,
             true,
+            false, // static scissor
         )
     }
 
@@ -2799,6 +2800,7 @@ impl GraphicsPipeline {
             crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
             false,
             true,
+            false, // static scissor
         )
     }
 
@@ -2826,6 +2828,7 @@ impl GraphicsPipeline {
             0,
             true,
             true,
+            false, // static scissor
         )
     }
 
@@ -2854,6 +2857,7 @@ impl GraphicsPipeline {
             crate::VkPipelineCreateFlagBits::VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT as u32,
             true,
             false, // egui draws at Z=0 like the scene; disable depth test to avoid being culled
+            true,  // dynamic scissor for per-primitive clip rects
         )
     }
 
@@ -2869,6 +2873,7 @@ impl GraphicsPipeline {
         pipeline_create_flags: u32,
         blend_enable: bool,
         depth_test_enable: bool,
+        dynamic_scissor: bool,
     ) -> Result<Self> {
         use std::ptr;
 
@@ -3011,13 +3016,22 @@ impl GraphicsPipeline {
                 blendConstants: [0.0, 0.0, 0.0, 0.0],
             };
 
-            // Dynamic state (none for now)
+            // Dynamic state: scissor rect (set per-draw for egui clip regions)
+            let dynamic_states = [crate::VkDynamicState::VK_DYNAMIC_STATE_SCISSOR];
             let dynamic_state = crate::VkPipelineDynamicStateCreateInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
                 pNext: ptr::null(),
                 flags: 0,
-                dynamicStateCount: 0,
-                pDynamicStates: ptr::null(),
+                dynamicStateCount: if dynamic_scissor {
+                    dynamic_states.len() as u32
+                } else {
+                    0
+                },
+                pDynamicStates: if dynamic_scissor {
+                    dynamic_states.as_ptr()
+                } else {
+                    ptr::null()
+                },
             };
 
             // Depth stencil state for depth testing
@@ -3349,6 +3363,17 @@ impl CommandBuffer {
                 offset,
                 index_type.to_vk(),
             );
+        }
+    }
+
+    /// Set the dynamic scissor rect (requires VK_DYNAMIC_STATE_SCISSOR in the pipeline).
+    pub fn set_scissor(&self, x: i32, y: i32, width: u32, height: u32) {
+        let scissor = crate::VkRect2D {
+            offset: crate::VkOffset2D { x, y },
+            extent: crate::VkExtent2D { width, height },
+        };
+        unsafe {
+            crate::vkCmdSetScissor(self.buffer, 0, 1, &scissor);
         }
     }
 

@@ -9,9 +9,10 @@
 use glm::ext::{look_at, perspective, rotate, scale, translate};
 use glm::{mat4, vec3, Mat4};
 use rust_and_vulkan::simple::{
-    Buffer, CommandBuffer, ComputePipeline, Error, Format, GraphicsPipeline, HazardFlags,
-    IndexType, MemoryType, PipelineLayout, RootArguments, ShaderModule, Swapchain, Texture,
-    TextureDescriptorHeap, TextureUsage, STAGE_COMPUTE, STAGE_TRANSFER,
+    Buffer, CommandBuffer, ComputePipeline, DescriptorPool, DescriptorSetLayout, Error, Format,
+    GraphicsPipeline, HazardFlags, IndexType, MemoryType, PipelineLayout, RootArguments,
+    ShaderModule, Swapchain, Texture, TextureDescriptorHeap, TextureUsage, STAGE_COMPUTE,
+    STAGE_TRANSFER,
 };
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 use std::f32::consts::PI;
@@ -83,55 +84,150 @@ fn identity() -> Mat4 {
 }
 
 fn make_cube_mesh() -> (Vec<Vertex>, Vec<u32>) {
-    let positions = [
-        [-0.5, -0.5, -0.5],
-        [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5],
-        [-0.5, 0.5, -0.5],
-        [-0.5, -0.5, 0.5],
-        [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5],
-        [-0.5, 0.5, 0.5],
-    ];
+    // Build cube like sphere does: separate vertices and indices
+    let mut vertices = Vec::new();
 
-    let normals = [
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
-        [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
-    ];
+    // Front face (Z+) normal = [0, 0, 1]
+    vertices.push(Vertex {
+        pos: [-0.5, -0.5, 0.5],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, -0.5, 0.5],
+        normal: [0.0, 0.0, 1.0],
+        uv: [1.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, 0.5, 0.5],
+        normal: [0.0, 0.0, 1.0],
+        uv: [1.0, 1.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, 0.5, 0.5],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 1.0],
+    });
 
-    let uvs = [
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 1.0],
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 1.0],
-    ];
+    // Back face (Z-) normal = [0, 0, -1]
+    vertices.push(Vertex {
+        pos: [0.5, -0.5, -0.5],
+        normal: [0.0, 0.0, -1.0],
+        uv: [0.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, -0.5, -0.5],
+        normal: [0.0, 0.0, -1.0],
+        uv: [1.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, 0.5, -0.5],
+        normal: [0.0, 0.0, -1.0],
+        uv: [1.0, 1.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, 0.5, -0.5],
+        normal: [0.0, 0.0, -1.0],
+        uv: [0.0, 1.0],
+    });
 
-    let vertices: Vec<Vertex> = (0..8)
-        .map(|i| Vertex {
-            pos: positions[i],
-            normal: normals[i],
-            uv: uvs[i],
-        })
-        .collect();
+    // Right face (X+) normal = [1, 0, 0]
+    vertices.push(Vertex {
+        pos: [0.5, -0.5, 0.5],
+        normal: [1.0, 0.0, 0.0],
+        uv: [0.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, -0.5, -0.5],
+        normal: [1.0, 0.0, 0.0],
+        uv: [1.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, 0.5, -0.5],
+        normal: [1.0, 0.0, 0.0],
+        uv: [1.0, 1.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, 0.5, 0.5],
+        normal: [1.0, 0.0, 0.0],
+        uv: [0.0, 1.0],
+    });
 
+    // Left face (X-) normal = [-1, 0, 0]
+    vertices.push(Vertex {
+        pos: [-0.5, -0.5, -0.5],
+        normal: [-1.0, 0.0, 0.0],
+        uv: [0.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, -0.5, 0.5],
+        normal: [-1.0, 0.0, 0.0],
+        uv: [1.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, 0.5, 0.5],
+        normal: [-1.0, 0.0, 0.0],
+        uv: [1.0, 1.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, 0.5, -0.5],
+        normal: [-1.0, 0.0, 0.0],
+        uv: [0.0, 1.0],
+    });
+
+    // Top face (Y+) normal = [0, 1, 0]
+    vertices.push(Vertex {
+        pos: [-0.5, 0.5, 0.5],
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, 0.5, 0.5],
+        normal: [0.0, 1.0, 0.0],
+        uv: [1.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, 0.5, -0.5],
+        normal: [0.0, 1.0, 0.0],
+        uv: [1.0, 1.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, 0.5, -0.5],
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.0, 1.0],
+    });
+
+    // Bottom face (Y-) normal = [0, -1, 0]
+    vertices.push(Vertex {
+        pos: [-0.5, -0.5, -0.5],
+        normal: [0.0, -1.0, 0.0],
+        uv: [0.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, -0.5, -0.5],
+        normal: [0.0, -1.0, 0.0],
+        uv: [1.0, 0.0],
+    });
+    vertices.push(Vertex {
+        pos: [0.5, -0.5, 0.5],
+        normal: [0.0, -1.0, 0.0],
+        uv: [1.0, 1.0],
+    });
+    vertices.push(Vertex {
+        pos: [-0.5, -0.5, 0.5],
+        normal: [0.0, -1.0, 0.0],
+        uv: [0.0, 1.0],
+    });
+
+    // Indices referencing the vertices
     let indices = vec![
-        // front
-        0, 1, 2, 2, 3, 0, // right
-        1, 5, 6, 6, 2, 1, // back
-        5, 4, 7, 7, 6, 5, // left
-        4, 0, 3, 3, 7, 4, // bottom
-        0, 4, 5, 5, 1, 0, // top
-        3, 2, 6, 6, 7, 3,
+        // Front face (vertices 0-3)
+        0, 1, 2, 2, 3, 0, // Back face (vertices 4-7)
+        4, 5, 6, 6, 7, 4, // Right face (vertices 8-11)
+        8, 9, 10, 10, 11, 8, // Left face (vertices 12-15)
+        12, 13, 14, 14, 15, 12, // Top face (vertices 16-19)
+        16, 17, 18, 18, 19, 16, // Bottom face (vertices 20-23)
+        20, 21, 22, 22, 23, 20,
     ];
 
     (vertices, indices)
@@ -369,13 +465,10 @@ fn main() -> Result<(), String> {
         texture_indices.push(descriptor_index);
     }
 
-    println!(
-        "Generated {} compute textures and wrote them to the bindless descriptor heap.",
-        texture_indices.len()
-    );
+    println!("Generated {} compute textures.", textures.len());
     if !bindless_supported {
         println!(
-            "Descriptor buffer extension unavailable on this driver; running with procedural shading fallback."
+            "Descriptor buffer extension unavailable on this driver; using traditional descriptor sets."
         );
     }
 
@@ -384,10 +477,35 @@ fn main() -> Result<(), String> {
     let (sphere_vertices, sphere_indices) = make_sphere_mesh(20, 24);
     let (triangle_vertices, triangle_indices) = make_triangle_2d_mesh();
 
+    println!(
+        "Vertex struct size: {} bytes",
+        std::mem::size_of::<Vertex>()
+    );
+    println!("Expected: 32 bytes (3*4 + 3*4 + 2*4)");
+    println!(
+        "Draw3DRoot struct size: {} bytes, alignment: {} bytes",
+        std::mem::size_of::<Draw3DRoot>(),
+        std::mem::align_of::<Draw3DRoot>()
+    );
+
     let cube_vb = Buffer::vertex_buffer(&context, &cube_vertices)
         .map_err(|e| format!("Failed to create cube vertex buffer: {}", e))?;
     let cube_ib = Buffer::index_buffer_u32(&context, &cube_indices)
         .map_err(|e| format!("Failed to create cube index buffer: {}", e))?;
+
+    println!(
+        "Cube: {} vertices, {} indices",
+        cube_vertices.len(),
+        cube_indices.len()
+    );
+    println!(
+        "Cube vertex buffer address: 0x{:x}",
+        cube_vb.device_address()
+    );
+    println!(
+        "First cube vertex: pos={:?}, normal={:?}, uv={:?}",
+        cube_vertices[0].pos, cube_vertices[0].normal, cube_vertices[0].uv
+    );
 
     let sphere_vb = Buffer::vertex_buffer(&context, &sphere_vertices)
         .map_err(|e| format!("Failed to create sphere vertex buffer: {}", e))?;
@@ -399,8 +517,32 @@ fn main() -> Result<(), String> {
     let tri_ib = Buffer::index_buffer_u32(&context, &triangle_indices)
         .map_err(|e| format!("Failed to create 2D triangle index buffer: {}", e))?;
 
-    let layout_3d = PipelineLayout::with_bindless_textures(
+    // Create descriptor set layout for texture array (3 textures)
+    let desc_set_layout = DescriptorSetLayout::new_texture_array(&context, 3)
+        .map_err(|e| format!("Failed to create descriptor set layout: {}", e))?;
+
+    // Create descriptor pool and allocate descriptor set
+    let desc_pool = DescriptorPool::new(&context, 1, 3)
+        .map_err(|e| format!("Failed to create descriptor pool: {}", e))?;
+
+    let texture_desc_set = desc_pool
+        .allocate(&desc_set_layout)
+        .map_err(|e| format!("Failed to allocate descriptor set: {}", e))?;
+
+    // Write textures to descriptor set
+    let texture_refs: Vec<&Texture> = textures.iter().collect();
+    texture_desc_set
+        .write_textures(&context, &texture_refs, sampler)
+        .map_err(|e| format!("Failed to write descriptor set: {}", e))?;
+
+    println!(
+        "Descriptor set created and written with {} textures.",
+        textures.len()
+    );
+
+    let layout_3d = PipelineLayout::with_descriptor_set_layouts(
         &context,
+        &[desc_set_layout],
         rust_and_vulkan::simple::SHADER_STAGE_ALL_GRAPHICS,
     )
     .map_err(|e| format!("Failed to create 3D layout: {}", e))?;
@@ -444,10 +586,24 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create 2D pipeline: {}", e))?;
 
-    let root3d = RootArguments::new::<Draw3DRoot>(&context)
-        .map_err(|e| format!("Failed to allocate 3D root args: {}", e))?;
-    let root2d = RootArguments::new::<Draw2DRoot>(&context)
-        .map_err(|e| format!("Failed to allocate 2D root args: {}", e))?;
+    // Allocate per-frame root arguments sized to the number of frames in flight.
+    // Per-frame resources should be indexed by the CPU-visible frame slot (0..N-1),
+    // where N is frames_in_flight(), rather than by swapchain image index.
+    let frames = swapchain.frames_in_flight();
+    let mut root3d: Vec<RootArguments> = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        root3d.push(
+            RootArguments::new::<Draw3DRoot>(&context)
+                .map_err(|e| format!("Failed to allocate 3D root args: {}", e))?,
+        );
+    }
+    let mut root2d: Vec<RootArguments> = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        root2d.push(
+            RootArguments::new::<Draw2DRoot>(&context)
+                .map_err(|e| format!("Failed to allocate 2D root args: {}", e))?,
+        );
+    }
 
     let mut quit = false;
     let start = Instant::now();
@@ -498,35 +654,37 @@ fn main() -> Result<(), String> {
 
         // 3D pipeline pass: cube + sphere
         cmd.bind_pipeline(&pipeline_3d);
-        if bindless_supported {
-            cmd.bind_texture_heap_graphics(&texture_heap, &layout_3d, 0);
-        }
+        cmd.bind_descriptor_sets(&layout_3d, 0, &[&texture_desc_set]);
 
         let mut cube_model = identity();
-        cube_model = translate(&cube_model, vec3(-1.0, 0.0, 0.0));
-        cube_model = rotate(&cube_model, t * 0.9, vec3(0.5, 1.0, 0.1));
+        cube_model = translate(&cube_model, vec3(1.5, 2.0, 0.0));
+        cube_model = rotate(&cube_model, t * 0.55, vec3(0.2, 1.0, 0.0));
         let cube_mvp = projection * view * cube_model;
 
-        root3d
+        // Use the root arguments slot associated with the current CPU frame slot (frames-in-flight).
+        // This ensures we only overwrite root data that the GPU is no longer using.
+        let frame_idx = swapchain.current_frame_index();
+
+        root3d[frame_idx]
             .write(&Draw3DRoot {
                 vertex_ptr: cube_vb.device_address(),
-                texture_index: texture_indices[0],
-                material_mode: 0,
+                texture_index: texture_indices[1],
+                material_mode: 1,
                 mvp: mat4_to_array(&cube_mvp),
             })
             .map_err(|e| format!("Failed writing cube root args: {}", e))?;
 
-        cmd.set_graphics_root_arguments(&layout_3d, &root3d);
-        cmd.bind_vertex_buffer(0, &cube_vb, 0);
+        cmd.set_graphics_root_arguments(&layout_3d, &root3d[frame_idx]);
         cmd.bind_index_buffer(&cube_ib, 0, IndexType::U32);
         cmd.draw_indexed(cube_indices.len() as u32, 1, 0, 0, 0);
+        //cmd.draw(36, 1, 0, 0);
 
         let mut sphere_model = identity();
-        sphere_model = translate(&sphere_model, vec3(1.0, 0.0, 0.0));
+        sphere_model = translate(&sphere_model, vec3(1.5, 0.0, 0.0));
         sphere_model = rotate(&sphere_model, t * 0.55, vec3(0.2, 1.0, 0.0));
         let sphere_mvp = projection * view * sphere_model;
 
-        root3d
+        root3d[frame_idx]
             .write(&Draw3DRoot {
                 vertex_ptr: sphere_vb.device_address(),
                 texture_index: texture_indices[1],
@@ -535,8 +693,7 @@ fn main() -> Result<(), String> {
             })
             .map_err(|e| format!("Failed writing sphere root args: {}", e))?;
 
-        cmd.set_graphics_root_arguments(&layout_3d, &root3d);
-        cmd.bind_vertex_buffer(0, &sphere_vb, 0);
+        cmd.set_graphics_root_arguments(&layout_3d, &root3d[frame_idx]);
         cmd.bind_index_buffer(&sphere_ib, 0, IndexType::U32);
         cmd.draw_indexed(sphere_indices.len() as u32, 1, 0, 0, 0);
 
@@ -548,7 +705,7 @@ fn main() -> Result<(), String> {
         tri_model = scale(&tri_model, vec3(0.9, 0.9, 1.0));
         let tri_mvp = tri_model;
 
-        root2d
+        root2d[frame_idx]
             .write(&Draw2DRoot {
                 vertex_ptr: tri_vb.device_address(),
                 color: [0.95, 0.65, 0.2, 1.0],
@@ -556,8 +713,7 @@ fn main() -> Result<(), String> {
             })
             .map_err(|e| format!("Failed writing 2D root args: {}", e))?;
 
-        cmd.set_graphics_root_arguments(&layout_2d, &root2d);
-        cmd.bind_vertex_buffer(0, &tri_vb, 0);
+        cmd.set_graphics_root_arguments(&layout_2d, &root2d[frame_idx]);
         cmd.bind_index_buffer(&tri_ib, 0, IndexType::U32);
         cmd.draw_indexed(triangle_indices.len() as u32, 1, 0, 0, 0);
 

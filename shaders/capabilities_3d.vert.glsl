@@ -19,10 +19,10 @@ layout(buffer_reference, scalar) readonly buffer VertexBuffer {
 };
 
 layout(buffer_reference, scalar) readonly buffer DrawData {
-    uint64_t vertex_ptr;
-    uint texture_index;
-    uint material_mode;
-    mat4 mvp;
+    uint64_t vertex_ptr;       // offset 0, 8 bytes
+    uint texture_index;         // offset 8, 4 bytes  
+    uint material_mode;         // offset 12, 4 bytes
+    mat4 mvp;                   // offset 16, 64 bytes (with scalar layout, no padding needed)
 };
 
 layout(location = 0) out vec3 v_normal;

@@ -286,7 +286,12 @@ fn main() -> Result<(), String> {
 
         // Prepare egui renderer with tessellated output
         egui_renderer
-            .prepare(&context, clipped_primitives)
+            .prepare(
+                &context,
+                clipped_primitives,
+                extent.width as f32,
+                extent.height as f32,
+            )
             .map_err(|e| e.to_string())?;
 
         // Record commands

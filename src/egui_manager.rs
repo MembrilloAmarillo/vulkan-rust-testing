@@ -8,6 +8,7 @@
 pub struct EguiManager {
     pub ctx: egui::Context,
     pointer_pos: egui::Pos2,
+    raw_input: egui::RawInput,
     // UI state
     pub selected_option: String,
     pub data_display: String,
@@ -25,6 +26,7 @@ impl EguiManager {
         EguiManager {
             ctx,
             pointer_pos: egui::Pos2::ZERO,
+            raw_input: egui::RawInput::default(),
             selected_option: "None".to_string(),
             data_display: "No data selected".to_string(),
         }
@@ -37,60 +39,50 @@ impl EguiManager {
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_MOTION as u32 => {
                     let motion = &event.motion;
                     self.pointer_pos = egui::Pos2::new(motion.x, motion.y);
-                    self.ctx.input_mut(|i| {
-                        i.events.push(egui::Event::PointerMoved(self.pointer_pos));
-                    });
+                    self.raw_input
+                        .events
+                        .push(egui::Event::PointerMoved(self.pointer_pos));
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_BUTTON_DOWN as u32 => {
-                    self.ctx.input_mut(|i| {
-                        i.events.push(egui::Event::PointerButton {
-                            pos: self.pointer_pos,
-                            button: egui::PointerButton::Primary,
-                            pressed: true,
-                            modifiers: Default::default(),
-                        });
+                    self.raw_input.events.push(egui::Event::PointerButton {
+                        pos: self.pointer_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
                     });
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_BUTTON_UP as u32 => {
-                    self.ctx.input_mut(|i| {
-                        i.events.push(egui::Event::PointerButton {
-                            pos: self.pointer_pos,
-                            button: egui::PointerButton::Primary,
-                            pressed: false,
-                            modifiers: Default::default(),
-                        });
+                    self.raw_input.events.push(egui::Event::PointerButton {
+                        pos: self.pointer_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
                     });
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_WHEEL as u32 => {
                     let wheel = &event.wheel;
                     let delta = egui::Vec2::new(wheel.x, wheel.y) * 50.0;
-                    self.ctx.input_mut(|i| {
-                        i.events.push(egui::Event::Scroll(delta));
-                    });
+                    self.raw_input.events.push(egui::Event::Scroll(delta));
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_KEY_DOWN as u32 => {
                     let key = &event.key;
                     if let Some(egui_key) = sdl_key_to_egui(key.key) {
-                        self.ctx.input_mut(|i| {
-                            i.events.push(egui::Event::Key {
-                                key: egui_key,
-                                pressed: true,
-                                repeat: key.repeat as u8 != 0,
-                                modifiers: egui::Modifiers::default(),
-                            });
+                        self.raw_input.events.push(egui::Event::Key {
+                            key: egui_key,
+                            pressed: true,
+                            repeat: key.repeat as u8 != 0,
+                            modifiers: egui::Modifiers::default(),
                         });
                     }
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_KEY_UP as u32 => {
                     let key = &event.key;
                     if let Some(egui_key) = sdl_key_to_egui(key.key) {
-                        self.ctx.input_mut(|i| {
-                            i.events.push(egui::Event::Key {
-                                key: egui_key,
-                                pressed: false,
-                                repeat: false,
-                                modifiers: egui::Modifiers::default(),
-                            });
+                        self.raw_input.events.push(egui::Event::Key {
+                            key: egui_key,
+                            pressed: false,
+                            repeat: false,
+                            modifiers: egui::Modifiers::default(),
                         });
                     }
                 }
@@ -98,9 +90,7 @@ impl EguiManager {
                     let text = &event.text;
                     let cstr = std::ffi::CStr::from_ptr(text.text);
                     if let Ok(s) = cstr.to_str() {
-                        self.ctx.input_mut(|i| {
-                            i.events.push(egui::Event::Text(s.to_string()));
-                        });
+                        self.raw_input.events.push(egui::Event::Text(s.to_string()));
                     }
                 }
                 _ => {}
@@ -110,15 +100,12 @@ impl EguiManager {
 
     /// Begin UI frame
     pub fn begin_frame(&mut self, screen_width: f32, screen_height: f32) {
-        let ctx = &self.ctx;
-        ctx.input_mut(|i| {
-            i.screen_rect = egui::Rect::from_min_max(
-                egui::Pos2::ZERO,
-                egui::Pos2::new(screen_width, screen_height),
-            );
-        });
-
-        ctx.begin_frame(Default::default());
+        self.raw_input.screen_rect = Some(egui::Rect::from_min_max(
+            egui::Pos2::ZERO,
+            egui::Pos2::new(screen_width, screen_height),
+        ));
+        let raw_input = std::mem::take(&mut self.raw_input);
+        self.ctx.begin_frame(raw_input);
     }
 
     /// End UI frame and get tessellated output

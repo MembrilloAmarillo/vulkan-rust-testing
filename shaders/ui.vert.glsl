@@ -13,6 +13,7 @@ layout(push_constant) uniform PushConstants {
     uint64_t vertex_ptr;
     float window_width;
     float window_height;
+    uint texture_index;  // used by fragment shader; declared here for layout consistency
 } pc;
 
 layout(buffer_reference, scalar) readonly buffer VertexBuffer {
@@ -26,10 +27,12 @@ void main() {
     VertexBuffer vb = VertexBuffer(pc.vertex_ptr);
     Vertex v = vb.data[gl_VertexIndex];
 
-    // egui screen-space → Vulkan NDC; flip Y so (0,0) top-left maps to (-1,-1)
+    // egui screen-space → Vulkan NDC.
+    // Vulkan NDC: X=[-1,+1] left-to-right, Y=[-1,+1] top-to-bottom.
+    // egui screen-space: X=[0,w] left-to-right, Y=[0,h] top-to-bottom.
     vec2 ndc = vec2(
         (2.0 * v.position.x / pc.window_width)  - 1.0,
-        1.0 - (2.0 * v.position.y / pc.window_height)
+        (2.0 * v.position.y / pc.window_height) - 1.0
     );
 
     gl_Position = vec4(ndc, 0.0, 1.0);
