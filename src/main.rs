@@ -276,8 +276,13 @@ fn main() -> Result<(), String> {
                 });
         }
 
-        // End egui frame and get tessellated primitives
-        let (clipped_primitives, _textures_delta) = egui_manager.end_frame();
+        // End egui frame and get tessellated primitives + texture updates
+        let (clipped_primitives, textures_delta) = egui_manager.end_frame();
+
+        // Upload any new/changed textures (e.g. font atlas on first frame)
+        egui_renderer
+            .update_textures(&context, &textures_delta)
+            .map_err(|e| e.to_string())?;
 
         // Prepare egui renderer with tessellated output
         egui_renderer

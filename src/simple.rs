@@ -375,6 +375,11 @@ impl GraphicsContext {
         self.descriptor_buffer_supported
     }
 
+    /// Return the raw Vulkan device handle.
+    pub fn vk_device(&self) -> crate::VkDevice {
+        self.device
+    }
+
     /// Find memory type index for given memory type
     fn find_memory_type(&self, memory_type: MemoryType) -> Result<u32> {
         let property_flags = match memory_type {

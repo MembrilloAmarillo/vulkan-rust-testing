@@ -1,13 +1,15 @@
 //! egui Vulkan renderer using device addresses.
 //!
 //! Converts egui tessellated output into Vulkan draw calls.
-//! Uses device address buffers for minimal overhead.
+//! Uses device address buffers for vertex/index data, and a traditional
+//! descriptor set for the font texture (combined-image-sampler at set=0, binding=0).
 
 use egui::ClippedPrimitive;
 
 use crate::simple::{
-    Buffer, BufferUsage, CommandBuffer, Format, GraphicsContext, GraphicsPipeline, MemoryType,
-    PipelineLayout, ShaderModule,
+    Buffer, BufferUsage, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
+    GraphicsContext, GraphicsPipeline, MemoryType, PipelineLayout, ShaderModule, Texture,
+    TextureUsage,
 };
 
 #[repr(C)]
@@ -15,21 +17,29 @@ use crate::simple::{
 struct UIVertex {
     position: [f32; 2],
     uv: [f32; 2],
-    color: u32, // sRGB packed as RGBA
+    color: u32, // pre-multiplied sRGB packed as ABGR (little-endian RGBA)
 }
 
+/// Push constants: vertex buffer device address + screen size (16 bytes total).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UIPushConstants {
-    vertex_ptr: u64,
-    window_width: f32,
-    window_height: f32,
-    _padding: u32,
+    vertex_ptr: u64,    // 8 bytes
+    window_width: f32,  // 4 bytes
+    window_height: f32, // 4 bytes
 }
 
 pub struct EguiRenderer {
     pipeline: GraphicsPipeline,
     layout: PipelineLayout,
+    device: crate::VkDevice,
+    // Font texture + descriptor
+    font_texture: Option<Texture>,
+    font_sampler: crate::VkSampler,
+    descriptor_pool: DescriptorPool,
+    descriptor_set_layout: DescriptorSetLayout,
+    descriptor_set: Option<DescriptorSet>,
+    // Geometry buffers
     vertex_buffer: Option<Buffer>,
     index_buffer: Option<Buffer>,
     vertex_count: usize,
@@ -50,18 +60,28 @@ impl EguiRenderer {
         let vs = ShaderModule::new(context, &vert_spv).map_err(|e| e.to_string())?;
         let fs = ShaderModule::new(context, &frag_spv).map_err(|e| e.to_string())?;
 
-        // Create pipeline layout with push constants
-        let layout = PipelineLayout::with_push_constants_size(
+        // Descriptor set layout: set=0, binding=0 = combined image sampler (font atlas)
+        let descriptor_set_layout =
+            DescriptorSetLayout::new_texture_array(context, 1).map_err(|e| e.to_string())?;
+
+        // Descriptor pool: capacity for 1 set, 1 combined-image-sampler
+        let descriptor_pool = DescriptorPool::new(context, 1, 1).map_err(|e| e.to_string())?;
+
+        // Pipeline layout: descriptor set 0 + push constants.
+        // We borrow descriptor_set_layout by reference; it remains valid after this call.
+        let set_layouts = [descriptor_set_layout];
+        let layout = PipelineLayout::with_descriptor_set_layouts_and_push_size(
             context,
-            crate::simple::SHADER_STAGE_VERTEX,
+            &set_layouts,
+            crate::simple::SHADER_STAGE_VERTEX | crate::simple::SHADER_STAGE_FRAGMENT,
             std::mem::size_of::<UIPushConstants>() as u32,
         )
         .map_err(|e| e.to_string())?;
+        // Destructure the array to reclaim ownership
+        let [descriptor_set_layout] = set_layouts;
 
-        // Create graphics pipeline with alpha blending for UI transparency.
-        // Must also set VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT because the
-        // scene pipeline (rendered before egui) uses descriptor buffers, and Vulkan
-        // requires all pipelines in that command buffer to carry the same flag.
+        // Create alpha-blend pipeline (also sets VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        // to be compatible with the descriptor-buffer scene pipeline in the same command buffer).
         let pipeline = GraphicsPipeline::new_with_blend_descriptor_buffer(
             context,
             &vs,
@@ -74,9 +94,20 @@ impl EguiRenderer {
         )
         .map_err(|e| e.to_string())?;
 
+        // Sampler for font atlas
+        let font_sampler = context
+            .create_default_sampler()
+            .map_err(|e| e.to_string())?;
+
         Ok(EguiRenderer {
             pipeline,
             layout,
+            device: context.vk_device(),
+            font_texture: None,
+            font_sampler,
+            descriptor_pool,
+            descriptor_set_layout,
+            descriptor_set: None,
             vertex_buffer: None,
             index_buffer: None,
             vertex_count: 0,
@@ -86,156 +117,139 @@ impl EguiRenderer {
         })
     }
 
-    /// Update buffers with new egui output
+    /// Upload (or re-upload) the egui texture atlas.
+    /// Should be called each frame before `render()`, passing the `TexturesDelta`
+    /// returned by `egui::Context::end_frame()`.
+    pub fn update_textures(
+        &mut self,
+        context: &GraphicsContext,
+        textures_delta: &egui::TexturesDelta,
+    ) -> Result<(), String> {
+        for (id, delta) in &textures_delta.set {
+            // We only handle the built-in font atlas (TextureId::default() == Managed(0))
+            if *id != egui::TextureId::default() {
+                continue;
+            }
+            // Partial updates (sub-rect) not yet supported
+            if delta.pos.is_some() {
+                continue;
+            }
+
+            let (width, height, rgba_bytes) = image_delta_to_rgba(&delta.image);
+
+            let cmd = CommandBuffer::allocate(context).map_err(|e| e.to_string())?;
+            let texture = context
+                .upload_texture(
+                    &cmd,
+                    &rgba_bytes,
+                    width,
+                    height,
+                    Format::Rgba8Unorm,
+                    TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+                )
+                .map_err(|e| e.to_string())?;
+
+            // Write descriptor (only allocate once — the pool holds capacity for 1 set)
+            if self.descriptor_set.is_none() {
+                let ds = self
+                    .descriptor_pool
+                    .allocate(&self.descriptor_set_layout)
+                    .map_err(|e| e.to_string())?;
+                ds.write_textures(context, &[&texture], self.font_sampler)
+                    .map_err(|e| e.to_string())?;
+                self.descriptor_set = Some(ds);
+            } else if let Some(ref ds) = self.descriptor_set {
+                // Re-write the existing descriptor set to point at the new texture
+                ds.write_textures(context, &[&texture], self.font_sampler)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            self.font_texture = Some(texture);
+        }
+        Ok(())
+    }
+
+    /// Update vertex/index buffers with new egui tessellated output.
     pub fn prepare(
         &mut self,
         context: &GraphicsContext,
         clipped_primitives: Vec<ClippedPrimitive>,
     ) -> Result<(), String> {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
-        eprintln!(
-            "[egui] prepare() called with {} clipped primitives",
-            clipped_primitives.len()
-        );
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
 
         for ClippedPrimitive { primitive, .. } in clipped_primitives {
             match primitive {
                 egui::epaint::Primitive::Mesh(mesh) => {
-                    eprintln!(
-                        "[egui]   Mesh with {} vertices, {} indices",
-                        mesh.vertices.len(),
-                        mesh.indices.len()
-                    );
                     let index_offset = vertices.len() as u32;
 
-                    // Convert egui mesh to our vertex format
-                    for (vi, vertex) in mesh.vertices.iter().enumerate() {
-                        let color = vertex.color;
-                        let [r, g, b, a] = color.to_srgba_unmultiplied();
-                        // Pre-multiply alpha for the pre-multiplied alpha blend equation:
-                        //   srcFactor=ONE, dstFactor=ONE_MINUS_SRC_ALPHA
+                    for vertex in &mesh.vertices {
+                        let [r, g, b, a] = vertex.color.to_srgba_unmultiplied();
+                        // Pre-multiply alpha for (srcFactor=ONE, dstFactor=ONE_MINUS_SRC_ALPHA)
                         let a_f = a as f32 / 255.0;
                         let pr = ((r as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
                         let pg = ((g as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
                         let pb = ((b as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
-                        let packed_color = ((a as u32) << 24)
+                        let packed = ((a as u32) << 24)
                             | ((pb as u32) << 16)
                             | ((pg as u32) << 8)
                             | (pr as u32);
 
-                        if vi < 3 {
-                            eprintln!(
-                                "[egui]   Vertex {}: pos=({:.2}, {:.2}), color=rgba({}, {}, {}, {}), packed=0x{:08x}",
-                                vi, vertex.pos.x, vertex.pos.y, pr, pg, pb, a, packed_color
-                            );
-                        }
-
                         vertices.push(UIVertex {
                             position: [vertex.pos.x, vertex.pos.y],
                             uv: [vertex.uv.x, vertex.uv.y],
-                            color: packed_color,
+                            color: packed,
                         });
                     }
 
-                    // Add indices with offset
                     for index in &mesh.indices {
                         indices.push(index_offset + index);
                     }
                 }
-                egui::epaint::Primitive::Callback(_) => {
-                    // Skip callbacks for now
-                }
+                egui::epaint::Primitive::Callback(_) => {}
             }
         }
 
         self.vertex_count = vertices.len();
         self.index_count = indices.len();
 
-        // Update or create vertex buffer (only if size changed)
         if !vertices.is_empty() {
-            let needed_size = vertices.len() * std::mem::size_of::<UIVertex>();
-
-            // Only recreate if size changed significantly (with 10% headroom to reduce reallocations)
-            if self.vertex_capacity < needed_size || self.vertex_capacity > needed_size * 2 {
-                self.vertex_capacity = (needed_size as f32 * 1.2) as usize;
-
-                let buffer = Buffer::new(
+            let needed = vertices.len() * std::mem::size_of::<UIVertex>();
+            if self.vertex_capacity < needed || self.vertex_capacity > needed * 2 {
+                self.vertex_capacity = (needed as f32 * 1.2) as usize;
+                let buf = Buffer::new(
                     context,
                     self.vertex_capacity,
                     BufferUsage::VERTEX,
                     MemoryType::CpuMapped,
                 )
-                .map_err(|e| format!("Failed to create vertex buffer: {}", e))?;
-
-                // Write vertex data
-                let vertex_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        vertices.as_ptr() as *const u8,
-                        vertices.len() * std::mem::size_of::<UIVertex>(),
-                    )
-                };
-                buffer
-                    .write(vertex_bytes)
-                    .map_err(|e| format!("Failed to write vertex buffer: {}", e))?;
-
-                self.vertex_buffer = Some(buffer);
-            } else {
-                // Reuse existing buffer - just update data
-                if let Some(ref buf) = self.vertex_buffer {
-                    let vertex_bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            vertices.as_ptr() as *const u8,
-                            vertices.len() * std::mem::size_of::<UIVertex>(),
-                        )
-                    };
-                    buf.write(vertex_bytes)
-                        .map_err(|e| format!("Failed to write vertex buffer: {}", e))?;
-                }
+                .map_err(|e| format!("vertex buffer: {e}"))?;
+                buf.write(as_bytes(&vertices))
+                    .map_err(|e| format!("write vertices: {e}"))?;
+                self.vertex_buffer = Some(buf);
+            } else if let Some(ref buf) = self.vertex_buffer {
+                buf.write(as_bytes(&vertices))
+                    .map_err(|e| format!("write vertices: {e}"))?;
             }
         }
 
-        // Update or create index buffer (only if size changed)
         if !indices.is_empty() {
-            let needed_size = indices.len() * std::mem::size_of::<u32>();
-
-            // Only recreate if size changed significantly (with 10% headroom to reduce reallocations)
-            if self.index_capacity < needed_size || self.index_capacity > needed_size * 2 {
-                self.index_capacity = (needed_size as f32 * 1.2) as usize;
-
-                let buffer = Buffer::new(
+            let needed = indices.len() * std::mem::size_of::<u32>();
+            if self.index_capacity < needed || self.index_capacity > needed * 2 {
+                self.index_capacity = (needed as f32 * 1.2) as usize;
+                let buf = Buffer::new(
                     context,
                     self.index_capacity,
                     BufferUsage::INDEX,
                     MemoryType::CpuMapped,
                 )
-                .map_err(|e| format!("Failed to create index buffer: {}", e))?;
-
-                // Write index data
-                let index_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        indices.as_ptr() as *const u8,
-                        indices.len() * std::mem::size_of::<u32>(),
-                    )
-                };
-                buffer
-                    .write(index_bytes)
-                    .map_err(|e| format!("Failed to write index buffer: {}", e))?;
-
-                self.index_buffer = Some(buffer);
-            } else {
-                // Reuse existing buffer - just update data
-                if let Some(ref buf) = self.index_buffer {
-                    let index_bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            indices.as_ptr() as *const u8,
-                            indices.len() * std::mem::size_of::<u32>(),
-                        )
-                    };
-                    buf.write(index_bytes)
-                        .map_err(|e| format!("Failed to write index buffer: {}", e))?;
-                }
+                .map_err(|e| format!("index buffer: {e}"))?;
+                buf.write(as_bytes(&indices))
+                    .map_err(|e| format!("write indices: {e}"))?;
+                self.index_buffer = Some(buf);
+            } else if let Some(ref buf) = self.index_buffer {
+                buf.write(as_bytes(&indices))
+                    .map_err(|e| format!("write indices: {e}"))?;
             }
         }
 
@@ -249,31 +263,36 @@ impl EguiRenderer {
         screen_height: f32,
     ) -> Result<(), String> {
         if self.vertex_buffer.is_none() || self.index_buffer.is_none() || self.index_count == 0 {
-            eprintln!("[egui] render() skipped - no geometry");
             return Ok(());
         }
 
-        eprintln!(
-            "[egui] render() drawing {} indices, {} vertices, screen ({:.1}x{:.1})",
-            self.index_count, self.vertex_count, screen_width, screen_height
-        );
+        let Some(ref ds) = self.descriptor_set else {
+            // Font texture not yet uploaded — nothing to draw
+            return Ok(());
+        };
 
         cmd.bind_pipeline(&self.pipeline);
+
+        // Bind font texture (set=0, binding=0)
+        unsafe {
+            crate::vkCmdBindDescriptorSets(
+                cmd.vk_buffer(),
+                crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+                self.layout.vk_layout(),
+                0,
+                1,
+                &ds.vk_set(),
+                0,
+                std::ptr::null(),
+            );
+        }
 
         let pc = UIPushConstants {
             vertex_ptr: self.vertex_buffer.as_ref().unwrap().device_address(),
             window_width: screen_width,
             window_height: screen_height,
-            _padding: 0,
         };
-
-        let pc_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&pc as *const UIPushConstants) as *const u8,
-                std::mem::size_of::<UIPushConstants>(),
-            )
-        };
-        cmd.push_constants(&self.layout, pc_bytes);
+        cmd.push_constants(&self.layout, as_bytes(std::slice::from_ref(&pc)));
 
         cmd.bind_index_buffer(
             self.index_buffer.as_ref().unwrap(),
@@ -287,6 +306,57 @@ impl EguiRenderer {
 
     pub fn pipeline(&self) -> &GraphicsPipeline {
         &self.pipeline
+    }
+}
+
+impl Drop for EguiRenderer {
+    fn drop(&mut self) {
+        unsafe {
+            crate::vkDestroySampler(self.device, self.font_sampler, std::ptr::null());
+        }
+    }
+}
+
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+fn as_bytes<T>(slice: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            slice.as_ptr() as *const u8,
+            slice.len() * std::mem::size_of::<T>(),
+        )
+    }
+}
+
+/// Convert an egui `ImageData` to `(width, height, rgba8_bytes)`.
+fn image_delta_to_rgba(image: &egui::ImageData) -> (u32, u32, Vec<u8>) {
+    match image {
+        egui::ImageData::Color(img) => {
+            let w = img.size[0] as u32;
+            let h = img.size[1] as u32;
+            let bytes = img
+                .pixels
+                .iter()
+                .flat_map(|c| {
+                    let [r, g, b, a] = c.to_srgba_unmultiplied();
+                    [r, g, b, a]
+                })
+                .collect();
+            (w, h, bytes)
+        }
+        egui::ImageData::Font(img) => {
+            let w = img.size[0] as u32;
+            let h = img.size[1] as u32;
+            // srgba_pixels bakes coverage into the alpha channel
+            let bytes = img
+                .srgba_pixels(None)
+                .flat_map(|c| {
+                    let [r, g, b, a] = c.to_srgba_unmultiplied();
+                    [r, g, b, a]
+                })
+                .collect();
+            (w, h, bytes)
+        }
     }
 }
 
