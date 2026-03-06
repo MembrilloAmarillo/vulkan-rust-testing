@@ -34,6 +34,8 @@ pub struct EguiRenderer {
     index_buffer: Option<Buffer>,
     vertex_count: usize,
     index_count: usize,
+    vertex_capacity: usize,
+    index_capacity: usize,
 }
 
 impl EguiRenderer {
@@ -76,6 +78,8 @@ impl EguiRenderer {
             index_buffer: None,
             vertex_count: 0,
             index_count: 0,
+            vertex_capacity: 0,
+            index_capacity: 0,
         })
     }
 
@@ -123,76 +127,90 @@ impl EguiRenderer {
         self.vertex_count = vertices.len();
         self.index_count = indices.len();
 
-        // Update or create vertex buffer
+        // Update or create vertex buffer (only if size changed)
         if !vertices.is_empty() {
-            let buffer = Buffer::new(
-                context,
-                vertices.len() * std::mem::size_of::<UIVertex>(),
-                BufferUsage::VERTEX,
-                MemoryType::CpuMapped,
-            )
-            .map_err(|e| format!("Failed to create vertex buffer: {}", e))?;
+            let needed_size = vertices.len() * std::mem::size_of::<UIVertex>();
 
-            // Write vertex data
-            let vertex_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    vertices.as_ptr() as *const u8,
-                    vertices.len() * std::mem::size_of::<UIVertex>(),
+            // Only recreate if size changed significantly (with 10% headroom to reduce reallocations)
+            if self.vertex_capacity < needed_size || self.vertex_capacity > needed_size * 2 {
+                self.vertex_capacity = (needed_size as f32 * 1.2) as usize;
+
+                let buffer = Buffer::new(
+                    context,
+                    self.vertex_capacity,
+                    BufferUsage::VERTEX,
+                    MemoryType::CpuMapped,
                 )
-            };
-            buffer
-                .write(vertex_bytes)
-                .map_err(|e| format!("Failed to write vertex buffer: {}", e))?;
+                .map_err(|e| format!("Failed to create vertex buffer: {}", e))?;
 
-            self.vertex_buffer = Some(buffer);
+                // Write vertex data
+                let vertex_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        vertices.as_ptr() as *const u8,
+                        vertices.len() * std::mem::size_of::<UIVertex>(),
+                    )
+                };
+                buffer
+                    .write(vertex_bytes)
+                    .map_err(|e| format!("Failed to write vertex buffer: {}", e))?;
+
+                self.vertex_buffer = Some(buffer);
+            } else {
+                // Reuse existing buffer - just update data
+                if let Some(ref buf) = self.vertex_buffer {
+                    let vertex_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            vertices.as_ptr() as *const u8,
+                            vertices.len() * std::mem::size_of::<UIVertex>(),
+                        )
+                    };
+                    buf.write(vertex_bytes)
+                        .map_err(|e| format!("Failed to write vertex buffer: {}", e))?;
+                }
+            }
         }
 
-        // Update or create index buffer
+        // Update or create index buffer (only if size changed)
         if !indices.is_empty() {
-            let buffer = Buffer::new(
-                context,
-                indices.len() * std::mem::size_of::<u32>(),
-                BufferUsage::INDEX,
-                MemoryType::CpuMapped,
-            )
-            .map_err(|e| format!("Failed to create index buffer: {}", e))?;
+            let needed_size = indices.len() * std::mem::size_of::<u32>();
 
-            // Write index data
-            let index_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    indices.as_ptr() as *const u8,
-                    indices.len() * std::mem::size_of::<u32>(),
+            // Only recreate if size changed significantly (with 10% headroom to reduce reallocations)
+            if self.index_capacity < needed_size || self.index_capacity > needed_size * 2 {
+                self.index_capacity = (needed_size as f32 * 1.2) as usize;
+
+                let buffer = Buffer::new(
+                    context,
+                    self.index_capacity,
+                    BufferUsage::INDEX,
+                    MemoryType::CpuMapped,
                 )
-            };
-            buffer
-                .write(index_bytes)
-                .map_err(|e| format!("Failed to write index buffer: {}", e))?;
+                .map_err(|e| format!("Failed to create index buffer: {}", e))?;
 
-            self.index_buffer = Some(buffer);
-        }
+                // Write index data
+                let index_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        indices.as_ptr() as *const u8,
+                        indices.len() * std::mem::size_of::<u32>(),
+                    )
+                };
+                buffer
+                    .write(index_bytes)
+                    .map_err(|e| format!("Failed to write index buffer: {}", e))?;
 
-        // Update or create index buffer
-        if !indices.is_empty() {
-            let buffer = Buffer::new(
-                context,
-                indices.len() * std::mem::size_of::<u32>(),
-                BufferUsage::INDEX,
-                MemoryType::CpuMapped,
-            )
-            .map_err(|e| format!("Failed to create index buffer: {}", e))?;
-
-            // Write index data
-            let index_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    indices.as_ptr() as *const u8,
-                    indices.len() * std::mem::size_of::<u32>(),
-                )
-            };
-            buffer
-                .write(index_bytes)
-                .map_err(|e| format!("Failed to write index buffer: {}", e))?;
-
-            self.index_buffer = Some(buffer);
+                self.index_buffer = Some(buffer);
+            } else {
+                // Reuse existing buffer - just update data
+                if let Some(ref buf) = self.index_buffer {
+                    let index_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            indices.as_ptr() as *const u8,
+                            indices.len() * std::mem::size_of::<u32>(),
+                        )
+                    };
+                    buf.write(index_bytes)
+                        .map_err(|e| format!("Failed to write index buffer: {}", e))?;
+                }
+            }
         }
 
         Ok(())
@@ -227,9 +245,9 @@ impl EguiRenderer {
         };
         cmd.push_constants(&self.layout, pc_bytes);
 
-        // Draw vertices
-        if let (Some(vbuf), Some(ibuf)) = (&self.vertex_buffer, &self.index_buffer) {
-            cmd.bind_vertex_buffer(0, vbuf, 0);
+        // Bind index buffer (required even for device address vertex pulling)
+        // Vertices are accessed via device address in the shader
+        if let Some(ibuf) = &self.index_buffer {
             cmd.bind_index_buffer(ibuf, 0, crate::simple::IndexType::U32);
             cmd.draw_indexed(self.index_count as u32, 1, 0, 0, 0);
         }
