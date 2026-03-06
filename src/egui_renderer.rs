@@ -80,11 +80,9 @@ impl EguiRenderer {
         // Destructure the array to reclaim ownership
         let [descriptor_set_layout] = set_layouts;
 
-        // Create alpha-blend pipeline. Do NOT set VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
-        // here — that flag is incompatible with vkCmdBindDescriptorSets (which we use for the
-        // font texture). The scene pipeline uses descriptor buffers, but egui uses traditional
-        // descriptor sets; they can coexist in the same command buffer.
-        let pipeline = GraphicsPipeline::new_with_blend(
+        // Create alpha-blend pipeline (also sets VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        // to be compatible with the descriptor-buffer scene pipeline in the same command buffer).
+        let pipeline = GraphicsPipeline::new_with_blend_descriptor_buffer(
             context,
             &vs,
             &fs,
