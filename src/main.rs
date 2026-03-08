@@ -243,13 +243,13 @@ fn main() -> Result<(), String> {
     let mut last_frame_time = std::time::Instant::now();
     let mut smoothed_refresh_hz: f32 = 0.0;
     let smoothing_alpha: f32 = 0.10;
-    let mut refresh_label = String::from("Current refresh: --.- Hz");
+    let mut refresh_label = String::with_capacity(64); // Pre-allocate to prevent reallocation
+    refresh_label.push_str("Current refresh: --.- Hz");
     let mut next_refresh_label_update = std::time::Instant::now();
 
     // Event + render loop
     let mut quit = false;
     while !quit {
-        
         let now = std::time::Instant::now();
         let frame_dt = now.duration_since(last_frame_time).as_secs_f32();
         last_frame_time = now;
@@ -304,13 +304,13 @@ fn main() -> Result<(), String> {
                 .show(&egui_manager.ctx, |ui| {
                     ui.label("Select an option:");
                     if ui.button("Option 1").clicked() {
-                        egui_manager.selected_option = "Option 1".to_string();
+                        egui_manager.selected_option = "Option 1";
                     }
                     if ui.button("Option 2").clicked() {
-                        egui_manager.selected_option = "Option 2".to_string();
+                        egui_manager.selected_option = "Option 2";
                     }
                     if ui.button("Option 3").clicked() {
-                        egui_manager.selected_option = "Option 3".to_string();
+                        egui_manager.selected_option = "Option 3";
                     }
                 });
 
@@ -318,10 +318,10 @@ fn main() -> Result<(), String> {
                 .vscroll(true)
                 .show(&egui_manager.ctx, |ui| {
                     ui.label("Selected:");
-                    ui.label(&egui_manager.selected_option);
+                    ui.label(egui_manager.selected_option);
                     ui.separator();
                     ui.label("Status:");
-                    ui.label(&egui_manager.data_display);
+                    ui.label(egui_manager.data_display);
                     ui.separator();
                     ui.label(&refresh_label);
                 });
@@ -419,7 +419,15 @@ fn main() -> Result<(), String> {
         if let Err(e) = swapchain.end_frame(&context) {
             eprintln!("end_frame failed: {e:?}");
         }
-
+        
+        // CRITICAL: Reset command pool EVERY FRAME with GPU synchronization
+        // This prevents memory accumulation in the command buffer pool from temporary allocations
+        // Must wait for GPU to finish before resetting
+        if let Err(e) = context.wait_idle() {
+            eprintln!("wait_idle before pool reset failed: {e:?}");
+        } else if let Err(e) = context.reset_command_pool_with_release() {
+            eprintln!("Command pool reset failed: {e:?}");
+        }
     }
 
     // Ensure device idle before drop order tears things down.

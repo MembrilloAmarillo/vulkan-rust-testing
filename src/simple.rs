@@ -930,14 +930,11 @@ impl GraphicsContext {
                 )));
             }
 
-            // Create wait stage masks (all graphics)
-            let wait_stages: Vec<u32> = wait_semaphores
-                .iter()
-                .map(|_| {
-                    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        as u32
-                })
-                .collect();
+            // Create wait stage masks on stack (typically 1-2 semaphores)
+            // Avoid allocating Vec on every frame to prevent allocator churn
+            const MAX_STAGES: usize = 8;
+            let mut wait_stages_array = [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT as u32; MAX_STAGES];
+            let wait_stages = &wait_stages_array[0..wait_semaphores.len()];
 
             let submit_info = crate::VkSubmitInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -991,14 +988,11 @@ impl GraphicsContext {
         use std::ptr;
 
         unsafe {
-            // Create wait stage masks (all graphics)
-            let wait_stages: Vec<u32> = wait_semaphores
-                .iter()
-                .map(|_| {
-                    crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        as u32
-                })
-                .collect();
+            // Create wait stage masks on stack (typically 1-2 semaphores)
+            // Avoid allocating Vec on every frame to prevent allocator churn
+            const MAX_STAGES: usize = 8;
+            let mut wait_stages_array = [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT as u32; MAX_STAGES];
+            let wait_stages = &wait_stages_array[0..wait_semaphores.len()];
 
             let submit_info = crate::VkSubmitInfo {
                 sType: crate::VkStructureType::VK_STRUCTURE_TYPE_SUBMIT_INFO,

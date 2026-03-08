@@ -364,7 +364,6 @@ fn upload_texture_from_data(
 
     context
         .upload_texture(
-            &upload_cmd,
             pixels,
             width,
             height,

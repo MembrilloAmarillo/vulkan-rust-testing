@@ -10,9 +10,9 @@ pub struct EguiManager {
     pointer_pos: egui::Pos2,
     raw_input: egui::RawInput,
     start_time: std::time::Instant,
-    // UI state
-    pub selected_option: String,
-    pub data_display: String,
+    // UI state (using static string references to avoid allocations)
+    pub selected_option: &'static str,
+    pub data_display: &'static str,
 }
 
 impl EguiManager {
@@ -29,8 +29,8 @@ impl EguiManager {
             pointer_pos: egui::Pos2::ZERO,
             raw_input: egui::RawInput::default(),
             start_time: std::time::Instant::now(),
-            selected_option: "None".to_string(),
-            data_display: "No data selected".to_string(),
+            selected_option: "None",
+            data_display: "No data selected",
         }
     }
 
@@ -113,6 +113,9 @@ impl EguiManager {
         self.raw_input.time = Some(self.start_time.elapsed().as_secs_f64());
         let raw_input = std::mem::take(&mut self.raw_input);
         self.ctx.begin_frame(raw_input);
+        // Ensure events vector is cleared and reset to empty state
+        self.raw_input.events.clear();
+        self.raw_input = egui::RawInput::default();
     }
 
     /// End UI frame and get tessellated output
@@ -128,12 +131,12 @@ impl EguiManager {
     }
 
     /// Update selected option
-    pub fn set_selected_option(&mut self, option: String) {
+    pub fn set_selected_option(&mut self, option: &'static str) {
         self.selected_option = option;
     }
 
     /// Update data display
-    pub fn set_data_display(&mut self, data: String) {
+    pub fn set_data_display(&mut self, data: &'static str) {
         self.data_display = data;
     }
 }
