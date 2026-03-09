@@ -1,0 +1,129 @@
+# ECSS Command Automation - TOML Configuration Example
+# This file demonstrates how to configure automated ECSS command sequences
+
+# Target receiver address
+target = "192.168.1.100:5000"
+
+# Local address to bind to (0.0.0.0:0 = any address, random port)
+local = "0.0.0.0:0"
+
+# Global timeout in milliseconds (0 = no timeout)
+timeout_ms = 60000
+
+# Stop on first command failure
+stop_on_error = true
+
+# Repeat the entire sequence N times (0 = execute once)
+repeat_count = 0
+
+# ============================================================================
+# POWER UP SEQUENCE
+# ============================================================================
+
+[[commands]]
+name = "enable_main_power"
+apid = 100
+delay_ms = 0
+description = "Enable main power supply"
+data = [0x01, 0x00, 0xFF]
+retry_count = 2
+
+[commands.metadata]
+subsystem = "Power Management"
+priority = "critical"
+
+[[commands]]
+name = "enable_communications"
+apid = 101
+delay_ms = 1000
+description = "Enable communications subsystem"
+data = [0x02, 0x01]
+retry_count = 1
+
+[commands.metadata]
+subsystem = "Communications"
+priority = "high"
+
+# ============================================================================
+# ANTENNA CONFIGURATION
+# ============================================================================
+
+[[commands]]
+name = "configure_antenna_azimuth"
+apid = 102
+delay_ms = 500
+description = "Set antenna azimuth angle"
+data = [0x03, 0x45, 0x00]  # 45 degrees
+retry_count = 0
+
+[commands.metadata]
+subsystem = "Antenna Control"
+priority = "high"
+
+[[commands]]
+name = "configure_antenna_elevation"
+apid = 102
+delay_ms = 500
+description = "Set antenna elevation angle"
+data = [0x04, 0x30, 0x00]  # 30 degrees
+retry_count = 0
+
+[commands.metadata]
+subsystem = "Antenna Control"
+priority = "high"
+
+# ============================================================================
+# THERMAL SYSTEM
+# ============================================================================
+
+[[commands]]
+name = "enable_thermal_heaters"
+apid = 103
+delay_ms = 2000
+description = "Activate thermal heater elements"
+data = [0x10, 0x03]  # All heaters
+retry_count = 1
+
+[commands.metadata]
+subsystem = "Thermal Control"
+priority = "medium"
+
+[[commands]]
+name = "set_thermal_setpoint"
+apid = 103
+delay_ms = 1000
+description = "Set thermal control setpoint to 25°C"
+data = [0x11, 0x19]  # 25 degrees
+retry_count = 0
+
+[commands.metadata]
+subsystem = "Thermal Control"
+priority = "medium"
+
+# ============================================================================
+# SCIENCE PAYLOAD
+# ============================================================================
+
+[[commands]]
+name = "initialize_payload"
+apid = 200
+delay_ms = 3000
+description = "Initialize science payload instruments"
+data = [0x20, 0x01]
+retry_count = 2
+
+[commands.metadata]
+subsystem = "Science Payload"
+priority = "high"
+
+[[commands]]
+name = "start_data_collection"
+apid = 200
+delay_ms = 1000
+description = "Start collecting science data"
+data = [0x21, 0xFF]  # Full resolution
+retry_count = 1
+
+[commands.metadata]
+subsystem = "Science Payload"
+priority = "high"

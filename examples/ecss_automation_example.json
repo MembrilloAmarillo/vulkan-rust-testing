@@ -1,0 +1,105 @@
+{
+  "target": "192.168.1.100:5000",
+  "local": "0.0.0.0:0",
+  "timeout_ms": 60000,
+  "stop_on_error": true,
+  "repeat_count": 0,
+  "commands": [
+    {
+      "name": "enable_main_power",
+      "apid": 100,
+      "delay_ms": 0,
+      "description": "Enable main power supply",
+      "data": [1, 0, 255],
+      "retry_count": 2,
+      "metadata": {
+        "subsystem": "Power Management",
+        "priority": "critical"
+      }
+    },
+    {
+      "name": "enable_communications",
+      "apid": 101,
+      "delay_ms": 1000,
+      "description": "Enable communications subsystem",
+      "data": [2, 1],
+      "retry_count": 1,
+      "metadata": {
+        "subsystem": "Communications",
+        "priority": "high"
+      }
+    },
+    {
+      "name": "configure_antenna_azimuth",
+      "apid": 102,
+      "delay_ms": 500,
+      "description": "Set antenna azimuth angle",
+      "data": [3, 45, 0],
+      "retry_count": 0,
+      "metadata": {
+        "subsystem": "Antenna Control",
+        "priority": "high"
+      }
+    },
+    {
+      "name": "configure_antenna_elevation",
+      "apid": 102,
+      "delay_ms": 500,
+      "description": "Set antenna elevation angle",
+      "data": [4, 30, 0],
+      "retry_count": 0,
+      "metadata": {
+        "subsystem": "Antenna Control",
+        "priority": "high"
+      }
+    },
+    {
+      "name": "enable_thermal_heaters",
+      "apid": 103,
+      "delay_ms": 2000,
+      "description": "Activate thermal heater elements",
+      "data": [16, 3],
+      "retry_count": 1,
+      "metadata": {
+        "subsystem": "Thermal Control",
+        "priority": "medium"
+      }
+    },
+    {
+      "name": "set_thermal_setpoint",
+      "apid": 103,
+      "delay_ms": 1000,
+      "description": "Set thermal control setpoint to 25°C",
+      "data": [17, 25],
+      "retry_count": 0,
+      "metadata": {
+        "subsystem": "Thermal Control",
+        "priority": "medium"
+      }
+    },
+    {
+      "name": "initialize_payload",
+      "apid": 200,
+      "delay_ms": 3000,
+      "description": "Initialize science payload instruments",
+      "data": [32, 1],
+      "retry_count": 2,
+      "metadata": {
+        "subsystem": "Science Payload",
+        "priority": "high"
+      }
+    },
+    {
+      "name": "start_data_collection",
+      "apid": 200,
+      "delay_ms": 1000,
+      "description": "Start collecting science data",
+      "data": [33, 255],
+      "retry_count": 1,
+      "metadata": {
+        "subsystem": "Science Payload",
+        "priority": "high"
+      }
+    }
+  ]
+}

@@ -1,0 +1,167 @@
+{
+  "mission_name": "Example Spacecraft Mission",
+  "description": "10-phase spacecraft control automation sequence",
+  "total_duration_ms": 135000,
+  "commands": [
+    {
+      "phase": 1,
+      "description": "System Initialization - Enter Safe Mode",
+      "command": {
+        "apid": 6,
+        "packet_id": 0,
+        "name": "SYSTEM_SAFE_MODE_ENABLE"
+      },
+      "delay_ms": 1000
+    },
+    {
+      "phase": 2,
+      "description": "Switch to Operational Mode",
+      "command": {
+        "apid": 6,
+        "packet_id": 1,
+        "name": "SYSTEM_OPERATIONAL_MODE_ENABLE"
+      },
+      "delay_ms": 2000
+    },
+    {
+      "phase": 3,
+      "description": "Configure Beacon Frequency",
+      "command": {
+        "apid": 6,
+        "packet_id": 4,
+        "name": "SYSTEM_CHANGE_BEACON_FREQUENCY",
+        "parameters": {
+          "frequency": 437500000
+        }
+      },
+      "delay_ms": 1000
+    },
+    {
+      "phase": 4,
+      "description": "Configure Baudrate",
+      "command": {
+        "apid": 6,
+        "packet_id": 5,
+        "name": "SYSTEM_CHANGE_BAUDRATE",
+        "parameters": {
+          "new_baudrate": 9600
+        }
+      },
+      "delay_ms": 1000
+    },
+    {
+      "phase": 5,
+      "description": "Payload 1 Boot",
+      "command": {
+        "apid": 0,
+        "packet_id": 0,
+        "name": "PAY_1_BOOT"
+      },
+      "delay_ms": 2000
+    },
+    {
+      "phase": 6,
+      "description": "Enable Payload 1 Electric Noise Measurements",
+      "command": {
+        "apid": 0,
+        "packet_id": 1,
+        "name": "PAY_1_ELECTRIC_NOISE_ENABLE"
+      },
+      "delay_ms": 500
+    },
+    {
+      "phase": 6,
+      "description": "Enable Payload 1 X-Axis Measurements",
+      "command": {
+        "apid": 0,
+        "packet_id": 2,
+        "name": "PAY_1_X_AXIS_ENABLE"
+      },
+      "delay_ms": 500
+    },
+    {
+      "phase": 6,
+      "description": "Enable Payload 1 Y-Axis Measurements",
+      "command": {
+        "apid": 0,
+        "packet_id": 3,
+        "name": "PAY_1_Y_AXIS_ENABLE"
+      },
+      "delay_ms": 500
+    },
+    {
+      "phase": 6,
+      "description": "Enable Payload 1 Z-Axis Measurements",
+      "command": {
+        "apid": 0,
+        "packet_id": 4,
+        "name": "PAY_1_Z_AXIS_ENABLE"
+      },
+      "delay_ms": 500
+    },
+    {
+      "phase": 7,
+      "description": "Set Payload 1 Experiment Duration to 100000 seconds",
+      "command": {
+        "apid": 0,
+        "packet_id": 6,
+        "name": "PAY_1_STOP_TIME",
+        "parameters": {
+          "stop_time": 100000
+        }
+      },
+      "delay_ms": 1000
+    },
+    {
+      "phase": 8,
+      "description": "Wait for experiment collection (2 minutes)",
+      "command": {
+        "type": "delay"
+      },
+      "delay_ms": 120000
+    },
+    {
+      "phase": 8,
+      "description": "Download 10 Payload 1 Packets",
+      "command": {
+        "apid": 0,
+        "packet_id": 7,
+        "name": "PAY_1_DOWNLOAD_PACKET",
+        "parameters": {
+          "n_packets": 10
+        }
+      },
+      "delay_ms": 5000
+    },
+    {
+      "phase": 9,
+      "description": "Request EPS System Status",
+      "command": {
+        "apid": 2,
+        "packet_id": 8,
+        "name": "EPS_GET_SYSTEM_STATUS"
+      },
+      "delay_ms": 1000
+    },
+    {
+      "phase": 9,
+      "description": "Request PDU Housekeeping Data",
+      "command": {
+        "apid": 2,
+        "packet_id": 11,
+        "name": "EPS_GET_PDU_HOUSEKEEPING_DATA_ENG"
+      },
+      "delay_ms": 1000
+    },
+    {
+      "phase": 10,
+      "description": "Switch to Nominal Mode",
+      "command": {
+        "apid": 6,
+        "packet_id": 2,
+        "name": "SYSTEM_NOMINAL_MODE_ENABLE"
+      },
+      "delay_ms": 1000
+    }
+  ]
+}

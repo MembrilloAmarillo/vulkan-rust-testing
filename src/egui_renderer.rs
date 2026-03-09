@@ -351,6 +351,10 @@ impl EguiRenderer {
             // Only reallocate if needed grows beyond capacity OR shrinks to less than 1/4 of capacity
             // This prevents thrashing when UI size oscillates around the threshold
             if self.vertex_capacity < needed || self.vertex_capacity > needed * 4 {
+                // Wait for device idle before destroying old buffer
+                unsafe {
+                    crate::vkDeviceWaitIdle(self.device);
+                }
                 self.vertex_capacity = (needed as f32 * 1.5) as usize;
                 let buf = Buffer::new(
                     context,
@@ -377,6 +381,10 @@ impl EguiRenderer {
                     "ALLOC: Reallocating index buffer {} -> {} bytes",
                     self.index_capacity, needed
                 );
+                // Wait for device idle before destroying old buffer
+                unsafe {
+                    crate::vkDeviceWaitIdle(self.device);
+                }
                 self.index_capacity = (needed as f32 * 1.5) as usize;
                 let buf = Buffer::new(
                     context,
