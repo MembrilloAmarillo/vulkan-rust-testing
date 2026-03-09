@@ -4093,33 +4093,14 @@ fn present_mode_name(mode: crate::VkPresentModeKHR) -> &'static str {
 }
 
 impl Swapchain {
-    /// Create a new swapchain for the given window size
-    pub fn new(
+    /// Select the best surface format, preferring the specified format if available
+    fn select_format(
         context: &GraphicsContext,
         surface: crate::VkSurfaceKHR,
-        width: u32,
-        height: u32,
-    ) -> Result<Self> {
+        preferred_format: Option<crate::VkFormat>,
+    ) -> Result<crate::VkFormat> {
         use std::ptr;
-
         unsafe {
-            // Get surface capabilities
-            let mut capabilities =
-                std::mem::MaybeUninit::<crate::VkSurfaceCapabilitiesKHR>::zeroed();
-            let result = crate::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-                context.physical_device,
-                surface,
-                capabilities.as_mut_ptr(),
-            );
-            if result != crate::VkResult::VK_SUCCESS {
-                return Err(Error::Vulkan(format!(
-                    "Failed to get surface capabilities: {:?}",
-                    result
-                )));
-            }
-            let capabilities = capabilities.assume_init();
-
-            // Choose swapchain format
             let mut format_count = 0;
             let result = crate::vkGetPhysicalDeviceSurfaceFormatsKHR(
                 context.physical_device,
@@ -4149,8 +4130,15 @@ impl Swapchain {
             }
             formats.set_len(format_count as usize);
 
-            // Prefer B8G8R8A8_UNORM format if available
-            let format = formats
+            // If we have a preferred format, try to use it
+            if let Some(pref) = preferred_format {
+                if let Some(_) = formats.iter().find(|f| f.format == pref) {
+                    return Ok(pref);
+                }
+            }
+
+            // Otherwise prefer B8G8R8A8_UNORM format if available
+            Ok(formats
                 .iter()
                 .find(|f| f.format == crate::VkFormat::VK_FORMAT_B8G8R8A8_UNORM)
                 .map(|f| f.format)
@@ -4160,9 +4148,17 @@ impl Swapchain {
                     } else {
                         formats[0].format
                     }
-                });
+                }))
+        }
+    }
 
-            // Choose present mode (FIFO is always available)
+    /// Select the best present mode (FIFO is always available)
+    fn select_present_mode(
+        context: &GraphicsContext,
+        surface: crate::VkSurfaceKHR,
+    ) -> Result<crate::VkPresentModeKHR> {
+        use std::ptr;
+        unsafe {
             let mut present_mode_count = 0;
             let result = crate::vkGetPhysicalDeviceSurfacePresentModesKHR(
                 context.physical_device,
@@ -4193,11 +4189,43 @@ impl Swapchain {
             present_modes.set_len(present_mode_count as usize);
 
             // Prefer MAILBOX (triple buffering) if available, otherwise FIFO
-            let present_mode = present_modes
+            Ok(present_modes
                 .iter()
-                .find(|&&mode| mode == crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR)
+                .find(|&&m| m == crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR)
                 .copied()
-                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_MAILBOX_KHR);
+                .unwrap_or(crate::VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR))
+        }
+    }
+
+    /// Create a new swapchain for the given window size
+    pub fn new(
+        context: &GraphicsContext,
+        surface: crate::VkSurfaceKHR,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        use std::ptr;
+
+        unsafe {
+            // Get surface capabilities
+            let mut capabilities =
+                std::mem::MaybeUninit::<crate::VkSurfaceCapabilitiesKHR>::zeroed();
+            let result = crate::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                context.physical_device,
+                surface,
+                capabilities.as_mut_ptr(),
+            );
+            if result != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to get surface capabilities: {:?}",
+                    result
+                )));
+            }
+            let capabilities = capabilities.assume_init();
+
+            // Choose swapchain format and present mode using helper methods
+            let format = Self::select_format(context, surface, None)?;
+            let present_mode = Self::select_present_mode(context, surface)?;
             eprintln!(
                 "Swapchain present mode selected: {}",
                 present_mode_name(present_mode)
@@ -4726,6 +4754,453 @@ impl Swapchain {
                 current_image_index: 0,
                 slow_sync_log_counter: 0,
             })
+        }
+    }
+
+    /// Recreate the swapchain with new dimensions
+    /// This is called when the window is resized or when the swapchain becomes out of date
+    pub fn recreate(
+        &mut self,
+        context: &GraphicsContext,
+        surface_khr: crate::VkSurfaceKHR,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        unsafe {
+            // Wait for GPU to idle before destroying resources
+            let _ = crate::vkDeviceWaitIdle(self.device);
+
+            // Destroy old swapchain resources in reverse order of creation
+            for &framebuffer in &self.framebuffers {
+                crate::vkDestroyFramebuffer(self.device, framebuffer, std::ptr::null());
+            }
+            self.framebuffers.clear();
+
+            crate::vkDestroyRenderPass(self.device, self.render_pass, std::ptr::null());
+
+            for &image_view in &self.image_views {
+                crate::vkDestroyImageView(self.device, image_view, ptr::null());
+            }
+            self.image_views.clear();
+
+            crate::vkDestroyImageView(self.device, self.depth_image_view, ptr::null());
+            crate::vkFreeMemory(self.device, self.depth_memory, ptr::null());
+            crate::vkDestroyImage(self.device, self.depth_image, ptr::null());
+
+            // Destroy per-image render-finished semaphores
+            for &sem in &self.image_render_finished_semaphores {
+                crate::vkDestroySemaphore(self.device, sem, std::ptr::null());
+            }
+            self.image_render_finished_semaphores.clear();
+
+            // Destroy the old swapchain (pass VK_NULL_HANDLE since we're destroying it)
+            crate::vkDestroySwapchainKHR(self.device, self.swapchain, std::ptr::null());
+            self.swapchain = std::ptr::null_mut(); // Mark as destroyed
+            self.images.clear();
+
+            // Reset frame index since we're recreating
+            self.current_frame_index = 0;
+            self.current_image_index = 0;
+
+            // Get surface capabilities
+            let mut capabilities =
+                std::mem::MaybeUninit::<crate::VkSurfaceCapabilitiesKHR>::zeroed();
+            let res = crate::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                context.physical_device,
+                surface_khr,
+                capabilities.as_mut_ptr(),
+            );
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(
+                    "Failed to get surface capabilities".to_string(),
+                ));
+            }
+            let capabilities = capabilities.assume_init();
+
+            // Use provided dimensions or capabilities current extent
+            let extent = if capabilities.currentExtent.width != u32::MAX {
+                capabilities.currentExtent
+            } else {
+                crate::VkExtent2D {
+                    width: width.clamp(
+                        capabilities.minImageExtent.width,
+                        capabilities.maxImageExtent.width,
+                    ),
+                    height: height.clamp(
+                        capabilities.minImageExtent.height,
+                        capabilities.maxImageExtent.height,
+                    ),
+                }
+            };
+
+            // Try to preserve the current format, fall back to best available
+            let format = Self::select_format(context, surface_khr, Some(self.format))?;
+            let present_mode = Self::select_present_mode(context, surface_khr)?;
+
+            // Calculate image count
+            let image_count =
+                (capabilities.minImageCount + 1).min(if capabilities.maxImageCount == 0 {
+                    u32::MAX
+                } else {
+                    capabilities.maxImageCount
+                });
+
+            // Create new swapchain
+            let swapchain_create_info = crate::VkSwapchainCreateInfoKHR {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                pNext: ptr::null(),
+                flags: 0,
+                surface: surface_khr,
+                minImageCount: image_count,
+                imageFormat: format,
+                imageColorSpace: crate::VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+                imageExtent: extent,
+                imageArrayLayers: 1,
+                imageUsage: crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT as u32,
+                imageSharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
+                queueFamilyIndexCount: 0,
+                pQueueFamilyIndices: ptr::null(),
+                preTransform: capabilities.currentTransform,
+                compositeAlpha:
+                    crate::VkCompositeAlphaFlagBitsKHR::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                presentMode: present_mode,
+                clipped: crate::VK_TRUE,
+                oldSwapchain: std::ptr::null_mut(), // Already destroyed old swapchain
+            };
+
+            let mut new_swapchain = std::ptr::null_mut();
+            let res = crate::vkCreateSwapchainKHR(
+                self.device,
+                &swapchain_create_info,
+                ptr::null(),
+                &mut new_swapchain,
+            );
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(format!(
+                    "Failed to create swapchain: {:?}",
+                    res
+                )));
+            }
+
+            self.swapchain = new_swapchain;
+            self.format = format;
+            self.extent = extent;
+
+            // Get swapchain images
+            let mut image_count = 0;
+            let _ = crate::vkGetSwapchainImagesKHR(
+                self.device,
+                self.swapchain,
+                &mut image_count,
+                ptr::null_mut(),
+            );
+
+            let mut images = vec![std::ptr::null_mut(); image_count as usize];
+            let _ = crate::vkGetSwapchainImagesKHR(
+                self.device,
+                self.swapchain,
+                &mut image_count,
+                images.as_mut_ptr(),
+            );
+            self.images = images;
+
+            // Create image views
+            for &image in &self.images {
+                let image_view_create_info = crate::VkImageViewCreateInfo {
+                    sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                    pNext: ptr::null(),
+                    flags: 0,
+                    image,
+                    viewType: crate::VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
+                    format,
+                    components: crate::VkComponentMapping {
+                        r: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                        g: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                        b: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                        a: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    },
+                    subresourceRange: crate::VkImageSubresourceRange {
+                        aspectMask: crate::VkImageAspectFlagBits::VK_IMAGE_ASPECT_COLOR_BIT as u32,
+                        baseMipLevel: 0,
+                        levelCount: 1,
+                        baseArrayLayer: 0,
+                        layerCount: 1,
+                    },
+                };
+
+                let mut image_view = std::ptr::null_mut();
+                let res = crate::vkCreateImageView(
+                    self.device,
+                    &image_view_create_info,
+                    ptr::null(),
+                    &mut image_view,
+                );
+                if res != crate::VkResult::VK_SUCCESS {
+                    return Err(Error::Vulkan("Failed to create image view".to_string()));
+                }
+
+                self.image_views.push(image_view);
+            }
+
+            // Recreate depth buffer
+            let depth_image = crate::VkImageCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                imageType: crate::VkImageType::VK_IMAGE_TYPE_2D,
+                format: self.depth_format,
+                extent: crate::VkExtent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                },
+                mipLevels: 1,
+                arrayLayers: 1,
+                samples: crate::VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT,
+                tiling: crate::VkImageTiling::VK_IMAGE_TILING_OPTIMAL,
+                usage: crate::VkImageUsageFlagBits::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                    as u32,
+                sharingMode: crate::VkSharingMode::VK_SHARING_MODE_EXCLUSIVE,
+                queueFamilyIndexCount: 0,
+                pQueueFamilyIndices: ptr::null(),
+                initialLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+            };
+
+            let mut depth_image_handle = std::ptr::null_mut();
+            let res = crate::vkCreateImage(
+                self.device,
+                &depth_image,
+                ptr::null(),
+                &mut depth_image_handle,
+            );
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan("Failed to create depth image".to_string()));
+            }
+            self.depth_image = depth_image_handle;
+
+            // Allocate depth memory
+            let mut mem_requirements = std::mem::zeroed();
+            crate::vkGetImageMemoryRequirements(
+                self.device,
+                self.depth_image,
+                &mut mem_requirements,
+            );
+
+            let memory_type = context
+                .find_compatible_memory_type(MemoryType::GpuOnly, mem_requirements.memoryTypeBits)
+                .map_err(|_| {
+                    Error::Vulkan(
+                        "Failed to find suitable memory type for depth buffer".to_string(),
+                    )
+                })?;
+
+            let alloc_info = crate::VkMemoryAllocateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                pNext: ptr::null(),
+                allocationSize: mem_requirements.size,
+                memoryTypeIndex: memory_type,
+            };
+
+            let mut depth_memory = std::ptr::null_mut();
+            let res =
+                crate::vkAllocateMemory(self.device, &alloc_info, ptr::null(), &mut depth_memory);
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan("Failed to allocate depth memory".to_string()));
+            }
+            self.depth_memory = depth_memory;
+
+            let res = crate::vkBindImageMemory(self.device, self.depth_image, self.depth_memory, 0);
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(
+                    "Failed to bind depth image memory".to_string(),
+                ));
+            }
+
+            // Create depth image view
+            let depth_view_info = crate::VkImageViewCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                image: self.depth_image,
+                viewType: crate::VkImageViewType::VK_IMAGE_VIEW_TYPE_2D,
+                format: self.depth_format,
+                components: crate::VkComponentMapping {
+                    r: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    g: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    b: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                    a: crate::VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                subresourceRange: crate::VkImageSubresourceRange {
+                    aspectMask: crate::VkImageAspectFlagBits::VK_IMAGE_ASPECT_DEPTH_BIT as u32,
+                    baseMipLevel: 0,
+                    levelCount: 1,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+            };
+
+            let mut depth_view = std::ptr::null_mut();
+            let res = crate::vkCreateImageView(
+                self.device,
+                &depth_view_info,
+                ptr::null(),
+                &mut depth_view,
+            );
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan(
+                    "Failed to create depth image view".to_string(),
+                ));
+            }
+            self.depth_image_view = depth_view;
+
+            // Recreate render pass
+            let attachment_descriptions = [
+                // Color attachment
+                crate::VkAttachmentDescription {
+                    flags: 0,
+                    format,
+                    samples: crate::VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT,
+                    loadOp: crate::VkAttachmentLoadOp::VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    storeOp: crate::VkAttachmentStoreOp::VK_ATTACHMENT_STORE_OP_STORE,
+                    stencilLoadOp: crate::VkAttachmentLoadOp::VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                    stencilStoreOp: crate::VkAttachmentStoreOp::VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                    initialLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+                    finalLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                },
+                // Depth attachment
+                crate::VkAttachmentDescription {
+                    flags: 0,
+                    format: self.depth_format,
+                    samples: crate::VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT,
+                    loadOp: crate::VkAttachmentLoadOp::VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    storeOp: crate::VkAttachmentStoreOp::VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                    stencilLoadOp: crate::VkAttachmentLoadOp::VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                    stencilStoreOp: crate::VkAttachmentStoreOp::VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                    initialLayout: crate::VkImageLayout::VK_IMAGE_LAYOUT_UNDEFINED,
+                    finalLayout:
+                        crate::VkImageLayout::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                },
+            ];
+
+            let color_attachment_ref = crate::VkAttachmentReference {
+                attachment: 0,
+                layout: crate::VkImageLayout::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            };
+
+            let depth_attachment_ref = crate::VkAttachmentReference {
+                attachment: 1,
+                layout: crate::VkImageLayout::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            };
+
+            let subpass_desc = crate::VkSubpassDescription {
+                flags: 0,
+                pipelineBindPoint: crate::VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS,
+                inputAttachmentCount: 0,
+                pInputAttachments: ptr::null(),
+                colorAttachmentCount: 1,
+                pColorAttachments: &color_attachment_ref,
+                pResolveAttachments: ptr::null(),
+                pDepthStencilAttachment: &depth_attachment_ref,
+                preserveAttachmentCount: 0,
+                pPreserveAttachments: ptr::null(),
+            };
+
+            let subpass_dependency = crate::VkSubpassDependency {
+                srcSubpass: crate::VK_SUBPASS_EXTERNAL as u32,
+                dstSubpass: 0,
+                srcStageMask:
+                    (crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        as u32
+                        | crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                            as u32),
+                dstStageMask:
+                    (crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        as u32
+                        | crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                            as u32),
+                srcAccessMask: 0,
+                dstAccessMask: (crate::VkAccessFlagBits::VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                    as u32
+                    | crate::VkAccessFlagBits::VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT as u32),
+                dependencyFlags: 0,
+            };
+
+            let render_pass_info = crate::VkRenderPassCreateInfo {
+                sType: crate::VkStructureType::VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                attachmentCount: 2,
+                pAttachments: attachment_descriptions.as_ptr(),
+                subpassCount: 1,
+                pSubpasses: &subpass_desc,
+                dependencyCount: 1,
+                pDependencies: &subpass_dependency,
+            };
+
+            let mut render_pass = std::ptr::null_mut();
+            let res = crate::vkCreateRenderPass(
+                self.device,
+                &render_pass_info,
+                ptr::null(),
+                &mut render_pass,
+            );
+            if res != crate::VkResult::VK_SUCCESS {
+                return Err(Error::Vulkan("Failed to create render pass".to_string()));
+            }
+            self.render_pass = render_pass;
+
+            // Recreate framebuffers
+            for &image_view in &self.image_views {
+                let attachments = [image_view, self.depth_image_view];
+                let framebuffer_info = crate::VkFramebufferCreateInfo {
+                    sType: crate::VkStructureType::VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                    pNext: ptr::null(),
+                    flags: 0,
+                    renderPass: self.render_pass,
+                    attachmentCount: 2,
+                    pAttachments: attachments.as_ptr(),
+                    width: extent.width,
+                    height: extent.height,
+                    layers: 1,
+                };
+
+                let mut framebuffer = std::ptr::null_mut();
+                let res = crate::vkCreateFramebuffer(
+                    self.device,
+                    &framebuffer_info,
+                    ptr::null(),
+                    &mut framebuffer,
+                );
+                if res != crate::VkResult::VK_SUCCESS {
+                    return Err(Error::Vulkan("Failed to create framebuffer".to_string()));
+                }
+
+                self.framebuffers.push(framebuffer);
+            }
+
+            // Recreate per-image render-finished semaphores
+            for _ in 0..self.images.len() {
+                let semaphore_info = crate::VkSemaphoreCreateInfo {
+                    sType: crate::VkStructureType::VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                    pNext: ptr::null(),
+                    flags: 0,
+                };
+
+                let mut semaphore = std::ptr::null_mut();
+                let res = crate::vkCreateSemaphore(
+                    self.device,
+                    &semaphore_info,
+                    ptr::null(),
+                    &mut semaphore,
+                );
+                if res != crate::VkResult::VK_SUCCESS {
+                    return Err(Error::Vulkan("Failed to create semaphore".to_string()));
+                }
+
+                self.image_render_finished_semaphores.push(semaphore);
+            }
+
+            Ok(())
         }
     }
 

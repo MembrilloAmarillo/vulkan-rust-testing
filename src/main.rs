@@ -1,5 +1,20 @@
+use rust_and_vulkan::automation::AutomationFileLoader;
 use rust_and_vulkan::{EguiManager, EguiRenderer};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
+
+/// Helper function to render code in egui with line numbers
+fn render_code_editor(ui: &mut egui::Ui, code: &str) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .show(ui, |ui| {
+            for (line_num, line) in code.lines().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::GRAY, format!("{:4} | ", line_num + 1));
+                    ui.monospace(line);
+                });
+            }
+        });
+}
 
 use rust_and_vulkan::simple::{
     Buffer, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
@@ -230,8 +245,12 @@ fn main() -> Result<(), String> {
     let mut refresh_label = String::with_capacity(64); // Pre-allocate to prevent reallocation
     refresh_label.push_str("Current refresh: --.- Hz");
 
+    // Initialize automation file loader
+    let mut automation_loader = AutomationFileLoader::default();
+
     // Event + render loop
     let mut quit = false;
+    let mut window_resized = false;
     while !quit {
         let now = std::time::Instant::now();
         let frame_dt = now.duration_since(last_frame_time).as_secs_f32();
@@ -246,16 +265,61 @@ fn main() -> Result<(), String> {
             while rust_and_vulkan::SDL_PollEvent(&mut event) {
                 if event.type_ == rust_and_vulkan::SDL_EventType::SDL_EVENT_QUIT as u32 {
                     quit = true;
+                } else if event.type_
+                    == rust_and_vulkan::SDL_EventType::SDL_EVENT_WINDOW_RESIZED as u32
+                    || event.type_
+                        == rust_and_vulkan::SDL_EventType::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED
+                            as u32
+                {
+                    window_resized = true;
                 }
                 // Feed events to egui
                 egui_manager.handle_event(&event);
             }
         }
 
+        // Handle window resize by recreating swapchain
+        if window_resized {
+            // Get new window size
+            let mut width = 0i32;
+            let mut height = 0i32;
+            unsafe {
+                rust_and_vulkan::SDL_GetWindowSizeInPixels(window.window, &mut width, &mut height);
+            }
+
+            if width > 0 && height > 0 {
+                match swapchain.recreate(&context, surface_khr, width as u32, height as u32) {
+                    Ok(_) => println!("Swapchain recreated: {}x{}", width, height),
+                    Err(e) => eprintln!("Failed to recreate swapchain: {e:?}"),
+                }
+            }
+            window_resized = false;
+        }
+
         // Begin frame (acquire image, sync, reset cmd)
         if let Err(e) = swapchain.begin_frame() {
             eprintln!("begin_frame failed: {e:?}");
-            // For now just continue; in a real app you'd recreate swapchain on OUT_OF_DATE.
+            // On OUT_OF_DATE error, try to recreate the swapchain
+            if matches!(e, rust_and_vulkan::simple::Error::Vulkan(ref msg) if msg.contains("out of date"))
+            {
+                let mut width = 0i32;
+                let mut height = 0i32;
+                unsafe {
+                    rust_and_vulkan::SDL_GetWindowSizeInPixels(
+                        window.window,
+                        &mut width,
+                        &mut height,
+                    );
+                }
+
+                if width > 0 && height > 0 {
+                    if let Err(e) =
+                        swapchain.recreate(&context, surface_khr, width as u32, height as u32)
+                    {
+                        eprintln!("Failed to recreate swapchain: {e:?}");
+                    }
+                }
+            }
             continue;
         }
 
@@ -295,6 +359,137 @@ fn main() -> Result<(), String> {
                     ui.separator();
                     ui.label(egui::RichText::new(refresh_label.as_str()));
                 });
+
+            // Handle automation UI interactions first (without borrowing automation_loader in closures)
+            let mut should_navigate_up = false;
+            let mut should_refresh = false;
+            let mut file_to_load: Option<std::path::PathBuf> = None;
+            let mut should_close_code_display = false;
+
+            // Automation File Browser Window
+            if automation_loader.show_browser {
+                egui::Window::new("Automation File Loader")
+                    .open(&mut automation_loader.show_browser)
+                    .default_width(500.0)
+                    .default_height(400.0)
+                    .vscroll(true)
+                    .show(&egui_manager.ctx, |ui| {
+                        ui.heading("File Browser");
+
+                        // Current directory display
+                        ui.horizontal(|ui| {
+                            ui.label("Location:");
+                            let mut dir_str =
+                                automation_loader.current_dir.to_string_lossy().to_string();
+                            ui.text_edit_singleline(&mut dir_str);
+                        });
+
+                        // Navigation buttons
+                        ui.horizontal(|ui| {
+                            if ui.button("↑ Parent Directory").clicked() {
+                                should_navigate_up = true;
+                            }
+                            if ui.button("🔄 Refresh").clicked() {
+                                should_refresh = true;
+                            }
+                        });
+
+                        // File filter
+                        ui.horizontal(|ui| {
+                            ui.label("Filter:");
+                            let old_filter = automation_loader.file_filter.clone();
+                            ui.text_edit_singleline(&mut automation_loader.file_filter);
+                            if automation_loader.file_filter != old_filter {
+                                should_refresh = true;
+                            }
+                        });
+
+                        ui.separator();
+
+                        // File list
+                        ui.label(format!("Files ({}):", automation_loader.files.len()));
+
+                        for file in automation_loader.files.clone() {
+                            let icon = if file.is_dir { "📁" } else { "📄" };
+                            let size_str = if file.is_dir {
+                                String::new()
+                            } else {
+                                format!(" ({})", AutomationFileLoader::format_size(file.size))
+                            };
+
+                            let label = format!("{} {}{}", icon, file.name, size_str);
+
+                            if ui
+                                .selectable_label(
+                                    automation_loader.selected_file.as_ref() == Some(&file.path),
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                if file.is_dir {
+                                    file_to_load = Some(file.path.clone());
+                                } else {
+                                    file_to_load = Some(file.path.clone());
+                                }
+                            }
+                        }
+
+                        // Error message display
+                        if let Some(error) = &automation_loader.error_message {
+                            ui.separator();
+                            ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
+                        }
+                    });
+            }
+
+            // Process deferred actions
+            if should_navigate_up {
+                automation_loader.navigate_up();
+            }
+            if should_refresh {
+                automation_loader.refresh_files();
+            }
+            if let Some(path) = file_to_load {
+                if path.is_dir() {
+                    automation_loader.navigate_to(&path);
+                } else {
+                    automation_loader.load_file(&path);
+                }
+            }
+
+            // Code Display Window
+            if automation_loader.show_code_display {
+                // Pre-capture values to avoid borrow conflicts
+                let file_name = automation_loader.current_file_name();
+                let file_content = automation_loader.file_content.clone();
+
+                egui::Window::new("Code Display")
+                    .open(&mut automation_loader.show_code_display)
+                    .default_width(600.0)
+                    .default_height(500.0)
+                    .vscroll(false)
+                    .show(&egui_manager.ctx, |ui| {
+                        if let Some(name) = &file_name {
+                            ui.heading(format!("📄 {}", name));
+                        }
+
+                        ui.separator();
+
+                        if let Some(content) = &file_content {
+                            render_code_editor(ui, content.as_str());
+                        } else {
+                            ui.label("No file loaded");
+                        }
+
+                        if ui.button("Close").clicked() {
+                            should_close_code_display = true;
+                        }
+                    });
+
+                if should_close_code_display {
+                    automation_loader.show_code_display = false;
+                }
+            }
         }
 
         // End egui frame and get tessellated primitives + texture updates
