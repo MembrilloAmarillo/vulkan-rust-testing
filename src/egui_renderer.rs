@@ -57,6 +57,8 @@ pub struct EguiRenderer {
     device: crate::VkDevice,
     // Font texture + bindless descriptor heap
     font_texture: Option<Texture>,
+    font_texture_width: u32,
+    font_texture_height: u32,
     font_sampler: crate::VkSampler,
     font_heap: TextureDescriptorHeap,
     font_texture_index: u32,
@@ -125,6 +127,8 @@ impl EguiRenderer {
             layout,
             device: context.vk_device(),
             font_texture: None,
+            font_texture_width: 0,
+            font_texture_height: 0,
             font_sampler,
             font_heap,
             font_texture_index,
@@ -151,6 +155,8 @@ impl EguiRenderer {
             // We only own the default egui atlas texture in this renderer.
             if *id == egui::TextureId::default() {
                 self.font_texture = None;
+                self.font_texture_width = 0;
+                self.font_texture_height = 0;
                 self.font_heap_written = false;
             }
         }
@@ -160,37 +166,114 @@ impl EguiRenderer {
             if *id != egui::TextureId::default() {
                 continue;
             }
-            // Partial updates (sub-rect) not yet supported
-            if delta.pos.is_some() {
-                continue;
+
+            if let Some(pos) = delta.pos {
+                // Partial update: only some region of the texture changed
+                if let Some(texture) = &self.font_texture {
+                    // Upload the partial region to the existing texture
+                    self.update_texture_region(context, texture, &delta.image, pos)?;
+                }
+                // If texture doesn't exist yet, we'll get a full update later
+            } else {
+                // Full texture update
+                let (width, height, rgba_bytes) = image_delta_to_rgba(&delta.image);
+
+                let texture = context
+                    .upload_texture(
+                        &rgba_bytes,
+                        width,
+                        height,
+                        Format::Rgba8Unorm,
+                        TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                // Write (or re-write) the descriptor in the heap.
+                self.font_heap
+                    .write_descriptor(
+                        context,
+                        self.font_texture_index,
+                        &texture,
+                        self.font_sampler,
+                    )
+                    .map_err(|e| e.to_string())?;
+                self.font_heap_written = true;
+
+                self.font_texture_width = width;
+                self.font_texture_height = height;
+                self.font_texture = Some(texture);
             }
-
-            let (width, height, rgba_bytes) = image_delta_to_rgba(&delta.image);
-
-            let texture = context
-                .upload_texture(
-                    &rgba_bytes,
-                    width,
-                    height,
-                    Format::Rgba8Unorm,
-                    TextureUsage::SAMPLED | TextureUsage::TRANSFER_DST,
-                )
-                .map_err(|e| e.to_string())?;
-
-            // Write (or re-write) the descriptor in the heap.
-            self.font_heap
-                .write_descriptor(
-                    context,
-                    self.font_texture_index,
-                    &texture,
-                    self.font_sampler,
-                )
-                .map_err(|e| e.to_string())?;
-            self.font_heap_written = true;
-
-            self.font_texture = Some(texture);
         }
         Ok(())
+    }
+
+    /// Update a sub-region of the font texture.
+    fn update_texture_region(
+        &self,
+        context: &GraphicsContext,
+        texture: &Texture,
+        image: &egui::ImageData,
+        pos: [usize; 2],
+    ) -> Result<(), String> {
+        let (region_width, region_height, rgba_bytes) = image_delta_to_rgba(image);
+
+        // Create staging buffer for this region's data
+        let staging_size = rgba_bytes.len();
+        let staging = context
+            .gpu_malloc(staging_size, 16, crate::simple::MemoryType::CpuMapped)
+            .map_err(|e| format!("Failed to allocate staging buffer: {e}"))?;
+
+        staging
+            .write(&rgba_bytes)
+            .map_err(|e| format!("Failed to write to staging buffer: {e}"))?;
+
+        // Use single-time-submit command buffer for the update
+        let cmd = context
+            .begin_single_time_commands()
+            .map_err(|e| e.to_string())?;
+
+        // Transition texture to transfer destination
+        cmd.transition_to_transfer_dst(texture);
+
+        // Copy the region to the texture
+        self.copy_buffer_to_texture_region(
+            &cmd,
+            &staging,
+            texture,
+            pos,
+            region_width,
+            region_height,
+        );
+
+        // Transition texture back to shader read-only
+        cmd.transition_to_shader_read(texture);
+
+        // Submit and wait
+        context
+            .end_single_time_commands(cmd)
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    /// Copy a buffer to a specific region of a texture.
+    fn copy_buffer_to_texture_region(
+        &self,
+        cmd: &crate::simple::CommandBuffer,
+        src_buffer: &crate::simple::GpuAllocation,
+        dst_texture: &Texture,
+        region_pos: [usize; 2],
+        region_width: u32,
+        region_height: u32,
+    ) {
+        cmd.copy_buffer_to_texture_region(
+            src_buffer,
+            dst_texture,
+            region_pos[0] as i32,
+            region_pos[1] as i32,
+            region_width,
+            region_height,
+        );
     }
 
     /// Update vertex/index buffers with new egui tessellated output.
@@ -399,19 +482,6 @@ fn image_delta_to_rgba(image: &egui::ImageData) -> (u32, u32, Vec<u8>) {
             let bytes = img
                 .pixels
                 .iter()
-                .flat_map(|c| {
-                    let [r, g, b, a] = c.to_srgba_unmultiplied();
-                    [r, g, b, a]
-                })
-                .collect();
-            (w, h, bytes)
-        }
-        egui::ImageData::Font(img) => {
-            let w = img.size[0] as u32;
-            let h = img.size[1] as u32;
-            // srgba_pixels bakes coverage into the alpha channel
-            let bytes = img
-                .srgba_pixels(None)
                 .flat_map(|c| {
                     let [r, g, b, a] = c.to_srgba_unmultiplied();
                     [r, g, b, a]

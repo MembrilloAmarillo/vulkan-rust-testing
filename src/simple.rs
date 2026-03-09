@@ -934,7 +934,7 @@ impl GraphicsContext {
             // Create wait stage masks on stack (typically 1-2 semaphores)
             // Avoid allocating Vec on every frame to prevent allocator churn
             const MAX_STAGES: usize = 8;
-            let mut wait_stages_array =
+            let wait_stages_array =
                 [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
                     as u32; MAX_STAGES];
             let wait_stages = &wait_stages_array[0..wait_semaphores.len()];
@@ -994,7 +994,7 @@ impl GraphicsContext {
             // Create wait stage masks on stack (typically 1-2 semaphores)
             // Avoid allocating Vec on every frame to prevent allocator churn
             const MAX_STAGES: usize = 8;
-            let mut wait_stages_array =
+            let wait_stages_array =
                 [crate::VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
                     as u32; MAX_STAGES];
             let wait_stages = &wait_stages_array[0..wait_semaphores.len()];
@@ -3706,6 +3706,49 @@ impl CommandBuffer {
                     layerCount: 1,
                 },
                 imageOffset: crate::VkOffset3D { x: 0, y: 0, z: 0 },
+                imageExtent: crate::VkExtent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+            };
+            crate::vkCmdCopyBufferToImage(
+                self.buffer,
+                src_buffer.buffer(),
+                dst_texture.vk_image(),
+                crate::VkImageLayout::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &region,
+            );
+        }
+    }
+
+    /// Copy a buffer to a sub-region of a texture (with offset positioning).
+    pub fn copy_buffer_to_texture_region(
+        &self,
+        src_buffer: &GpuAllocation,
+        dst_texture: &Texture,
+        offset_x: i32,
+        offset_y: i32,
+        width: u32,
+        height: u32,
+    ) {
+        unsafe {
+            let region = crate::VkBufferImageCopy {
+                bufferOffset: 0,
+                bufferRowLength: 0,
+                bufferImageHeight: 0,
+                imageSubresource: crate::VkImageSubresourceLayers {
+                    aspectMask: dst_texture.format().aspect_mask(),
+                    mipLevel: 0,
+                    baseArrayLayer: 0,
+                    layerCount: 1,
+                },
+                imageOffset: crate::VkOffset3D {
+                    x: offset_x,
+                    y: offset_y,
+                    z: 0,
+                },
                 imageExtent: crate::VkExtent3D {
                     width,
                     height,

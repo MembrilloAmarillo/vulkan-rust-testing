@@ -293,7 +293,7 @@ fn main() -> Result<(), String> {
                     ui.label("Status:");
                     ui.label(egui_manager.data_display);
                     ui.separator();
-                    ui.label(&refresh_label);
+                    ui.label(egui::RichText::new(refresh_label.as_str()));
                 });
         }
 
@@ -323,7 +323,7 @@ fn main() -> Result<(), String> {
             swapchain.framebuffer(image_index),
             extent.width,
             extent.height,
-            [0.05, 0.05, 0.08, 1.0],
+            [0.95, 0.95, 0.95, 1.0], // Light gray background to match light theme
         );
 
         cmd.bind_pipeline(&pipeline);

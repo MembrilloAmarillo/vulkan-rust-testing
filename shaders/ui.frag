@@ -18,6 +18,8 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 void main() {
-    float atlas_alpha = texture(textures[nonuniformEXT(pc.texture_index)], v_uv).a;
-    out_color = v_color * atlas_alpha;
+    // egui uses an alpha-mask font atlas. Keep premultiplied-alpha semantics:
+    // scale both RGB and A by the sampled coverage.
+    float coverage = texture(textures[pc.texture_index], v_uv).a;
+    out_color = v_color * coverage;
 }

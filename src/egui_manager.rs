@@ -19,6 +19,8 @@ impl EguiManager {
     pub fn new() -> Self {
         let ctx = egui::Context::default();
 
+        ctx.set_visuals(egui::Visuals::light());
+
         // Configure egui for better performance
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::Vec2::new(8.0, 6.0);
@@ -68,13 +70,18 @@ impl EguiManager {
                 t if t == crate::SDL_EventType::SDL_EVENT_MOUSE_WHEEL as u32 => {
                     let wheel = &event.wheel;
                     let delta = egui::Vec2::new(wheel.x, wheel.y) * 50.0;
-                    self.raw_input.events.push(egui::Event::Scroll(delta));
+                    self.raw_input.events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta,
+                        modifiers: egui::Modifiers::default(),
+                    });
                 }
                 t if t == crate::SDL_EventType::SDL_EVENT_KEY_DOWN as u32 => {
                     let key = &event.key;
                     if let Some(egui_key) = sdl_key_to_egui(key.key) {
                         self.raw_input.events.push(egui::Event::Key {
                             key: egui_key,
+                            physical_key: None,
                             pressed: true,
                             repeat: key.repeat as u8 != 0,
                             modifiers: egui::Modifiers::default(),
@@ -86,6 +93,7 @@ impl EguiManager {
                     if let Some(egui_key) = sdl_key_to_egui(key.key) {
                         self.raw_input.events.push(egui::Event::Key {
                             key: egui_key,
+                            physical_key: None,
                             pressed: false,
                             repeat: false,
                             modifiers: egui::Modifiers::default(),
@@ -112,7 +120,7 @@ impl EguiManager {
         ));
         self.raw_input.time = Some(self.start_time.elapsed().as_secs_f64());
         let raw_input = std::mem::take(&mut self.raw_input);
-        self.ctx.begin_frame(raw_input);
+        self.ctx.begin_pass(raw_input);
         // Ensure events vector is cleared and reset to empty state
         self.raw_input.events.clear();
         self.raw_input = egui::RawInput::default();
@@ -120,7 +128,7 @@ impl EguiManager {
 
     /// End UI frame and get tessellated output
     pub fn end_frame(&mut self) -> (Vec<egui::ClippedPrimitive>, egui::TexturesDelta) {
-        let output = self.ctx.end_frame();
+        let output = self.ctx.end_pass();
         let shapes = self.ctx.tessellate(output.shapes, 1.0);
         (shapes, output.textures_delta)
     }
