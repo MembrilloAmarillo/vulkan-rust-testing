@@ -21,5 +21,9 @@ void main() {
     // egui uses an alpha-mask font atlas. Keep premultiplied-alpha semantics:
     // scale both RGB and A by the sampled coverage.
     float coverage = texture(textures[pc.texture_index], v_uv).a;
-    out_color = v_color * coverage;
+    if( v_uv.x == 0 && v_uv.y == 0 ) {
+        out_color = v_color;
+    } else {
+        out_color = v_color * coverage;
+    }
 }

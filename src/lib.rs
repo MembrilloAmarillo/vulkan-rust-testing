@@ -81,10 +81,7 @@ unsafe fn enumerate_instance_layer_names() -> Result<Vec<String>, String> {
     let mut layer_count = 0;
     let result = crate::vkEnumerateInstanceLayerProperties(&mut layer_count, std::ptr::null_mut());
     if result != crate::VkResult::VK_SUCCESS {
-        return Err(format!(
-            "Failed to enumerate instance layers: {:?}",
-            result
-        ));
+        return Err(format!("Failed to enumerate instance layers: {:?}", result));
     }
 
     let mut layer_properties = Vec::with_capacity(layer_count as usize);
@@ -218,6 +215,12 @@ pub mod simple;
 pub mod egui_manager;
 pub mod egui_renderer;
 
+// ECSS UDP Command Library
+pub mod ecss_udp;
+
+// ECSS Command Automation Framework
+pub mod ecss_automation;
+
 pub use egui_manager::EguiManager;
 pub use egui_renderer::EguiRenderer;
 
@@ -267,7 +270,10 @@ impl VulkanInstance {
                 let ext_name = std::ffi::CStr::from_ptr(ext_ptr)
                     .to_string_lossy()
                     .into_owned();
-                if !available_instance_extensions.iter().any(|name| name == &ext_name) {
+                if !available_instance_extensions
+                    .iter()
+                    .any(|name| name == &ext_name)
+                {
                     return Err(format!(
                         "Required SDL instance extension '{}' is not available on this system",
                         ext_name
@@ -601,8 +607,8 @@ impl VulkanDevice {
                 }
             }
 
-            let physical_device = selected_device
-                .ok_or("No suitable Vulkan physical device found".to_string())?;
+            let physical_device =
+                selected_device.ok_or("No suitable Vulkan physical device found".to_string())?;
             eprintln!(
                 "Selected physical device: '{}' (score={})",
                 selected_name, selected_score
@@ -675,7 +681,8 @@ impl VulkanDevice {
                 ));
             }
 
-            let optional_extensions_disabled = env_var_is_truthy(RAV_DISABLE_OPTIONAL_EXTENSIONS_ENV);
+            let optional_extensions_disabled =
+                env_var_is_truthy(RAV_DISABLE_OPTIONAL_EXTENSIONS_ENV);
             if optional_extensions_disabled {
                 eprintln!(
                     "{}=1 detected, optional device extensions/features will be disabled",
@@ -789,7 +796,8 @@ impl VulkanDevice {
             }
             eprintln!(
                 "Capabilities: descriptor_indexing_supported={}, descriptor_buffer_supported={}",
-                capabilities.descriptor_indexing_supported, capabilities.descriptor_buffer_supported
+                capabilities.descriptor_indexing_supported,
+                capabilities.descriptor_buffer_supported
             );
 
             // Core feature toggles
@@ -819,7 +827,8 @@ impl VulkanDevice {
             } else {
                 0
             };
-            vulkan12_features.runtimeDescriptorArray = if capabilities.descriptor_indexing_supported {
+            vulkan12_features.runtimeDescriptorArray = if capabilities.descriptor_indexing_supported
+            {
                 crate::VK_TRUE
             } else {
                 0

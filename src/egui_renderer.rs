@@ -305,11 +305,11 @@ impl EguiRenderer {
                     for vertex in &mesh.vertices {
                         let [r, g, b, a] = vertex.color.to_srgba_unmultiplied();
                         // Pre-multiply alpha for (srcFactor=ONE, dstFactor=ONE_MINUS_SRC_ALPHA)
-                        let a_f = a as f32 / 255.0;
-                        let pr = ((r as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
-                        let pg = ((g as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
-                        let pb = ((b as f32 / 255.0) * a_f * 255.0 + 0.5) as u8;
-                        let packed = ((a as u32) << 24)
+                        let a_f = a as u8;
+                        let pr = r as u8;
+                        let pg = g as u8;
+                        let pb = b as u8;
+                        let packed = ((a_f as u32) << 24)
                             | ((pb as u32) << 16)
                             | ((pg as u32) << 8)
                             | (pr as u32);

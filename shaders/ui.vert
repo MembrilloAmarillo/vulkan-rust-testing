@@ -38,4 +38,5 @@ void main() {
     gl_Position = vec4(ndc, 0.0, 1.0);
     v_uv    = v.uv;
     v_color = unpackUnorm4x8(v.color);
+    //v_color /= 255.0;
 }
