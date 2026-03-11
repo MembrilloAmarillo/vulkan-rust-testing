@@ -3,9 +3,23 @@
 //! Provides UI components for loading and displaying automation scripts/configurations.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+
+#[derive(Debug)]
+struct LoadRequest {
+    id: u64,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct LoadResult {
+    id: u64,
+    path: PathBuf,
+    content: Result<(String, Vec<usize>), String>,
+}
 
 /// State for the automation file loader UI
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AutomationFileLoader {
     /// Current directory being browsed
     pub current_dir: PathBuf,
@@ -17,12 +31,20 @@ pub struct AutomationFileLoader {
     pub file_content: Option<String>,
     /// Error message if any
     pub error_message: Option<String>,
+    /// Byte offsets for each line start; last entry is file length.
+    pub file_line_starts: Option<Vec<usize>>,
     /// Show file browser window
     pub show_browser: bool,
     /// Show code display window
     pub show_code_display: bool,
     /// Filter by file extension (e.g., ".lua", ".json", ".rs")
     pub file_filter: String,
+    /// Tracks whether an async file-load request is in flight
+    pub is_loading_file: bool,
+    pending_request_id: Option<u64>,
+    next_request_id: u64,
+    load_tx: Sender<LoadRequest>,
+    load_rx: Receiver<LoadResult>,
 }
 
 /// Represents a single file entry
@@ -31,11 +53,39 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
-    pub size: u64,
+    pub size: Option<u64>,
+    pub display_label: String,
 }
 
 impl Default for AutomationFileLoader {
     fn default() -> Self {
+        let (load_tx, request_rx) = mpsc::channel::<LoadRequest>();
+        let (result_tx, load_rx) = mpsc::channel::<LoadResult>();
+        std::thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                let content = std::fs::read_to_string(&request.path)
+                    .map(|content| {
+                        let mut line_starts = Vec::with_capacity(1024);
+                        line_starts.push(0);
+                        for (idx, byte) in content.as_bytes().iter().enumerate() {
+                            if *byte == b'\n' {
+                                line_starts.push(idx + 1);
+                            }
+                        }
+                        if line_starts.last().copied().unwrap_or(0) != content.len() {
+                            line_starts.push(content.len());
+                        }
+                        (content, line_starts)
+                    })
+                    .map_err(|e| format!("Failed to load file: {}", e));
+                let _ = result_tx.send(LoadResult {
+                    id: request.id,
+                    path: request.path,
+                    content,
+                });
+            }
+        });
+
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         AutomationFileLoader {
             current_dir,
@@ -43,9 +93,15 @@ impl Default for AutomationFileLoader {
             selected_file: None,
             file_content: None,
             error_message: None,
+            file_line_starts: None,
             show_browser: true,
             show_code_display: false,
             file_filter: String::new(), // Empty = show all files
+            is_loading_file: false,
+            pending_request_id: None,
+            next_request_id: 1,
+            load_tx,
+            load_rx,
         }
     }
 }
@@ -73,10 +129,9 @@ impl AutomationFileLoader {
                     .filter_map(|entry| {
                         let entry = entry.ok()?;
                         let path = entry.path();
-                        let metadata = entry.metadata().ok()?;
                         let name = entry.file_name().to_string_lossy().to_string();
-
-                        let is_dir = metadata.is_dir();
+                        let file_type = entry.file_type().ok()?;
+                        let is_dir = file_type.is_dir();
 
                         // Apply filter if set
                         if !self.file_filter.is_empty() && !is_dir {
@@ -85,11 +140,24 @@ impl AutomationFileLoader {
                             }
                         }
 
+                        let size = if is_dir {
+                            None
+                        } else {
+                            entry.metadata().ok().map(|m| m.len())
+                        };
+
+                        let icon = if is_dir { "📁" } else { "📄" };
+                        let size_suffix = size
+                            .map(|bytes| format!(" ({})", Self::format_size(bytes)))
+                            .unwrap_or_default();
+                        let display_label = format!("{} {}{}", icon, name, size_suffix);
+
                         Some(FileEntry {
                             path,
                             name,
                             is_dir,
-                            size: metadata.len(),
+                            size,
+                            display_label,
                         })
                     })
                     .collect();
@@ -116,6 +184,7 @@ impl AutomationFileLoader {
             self.refresh_files();
             self.selected_file = None;
             self.file_content = None;
+            self.file_line_starts = None;
         }
     }
 
@@ -126,6 +195,7 @@ impl AutomationFileLoader {
             self.refresh_files();
             self.selected_file = None;
             self.file_content = None;
+            self.file_line_starts = None;
         }
     }
 
@@ -138,14 +208,47 @@ impl AutomationFileLoader {
             return;
         }
 
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                self.selected_file = Some(path.to_path_buf());
-                self.file_content = Some(content);
-                self.show_code_display = true;
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.pending_request_id = Some(request_id);
+        self.is_loading_file = true;
+        self.selected_file = Some(path.to_path_buf());
+        self.show_code_display = true;
+        self.file_content = None;
+        self.file_line_starts = None;
+
+        if let Err(e) = self.load_tx.send(LoadRequest {
+            id: request_id,
+            path: path.to_path_buf(),
+        }) {
+            self.is_loading_file = false;
+            self.pending_request_id = None;
+            self.error_message = Some(format!("Failed to queue file load: {}", e));
+        }
+    }
+
+    /// Poll completion of async file-load requests.
+    pub fn poll_file_load(&mut self) {
+        while let Ok(result) = self.load_rx.try_recv() {
+            if self.pending_request_id != Some(result.id) {
+                continue;
             }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to load file: {}", e));
+
+            self.is_loading_file = false;
+            self.pending_request_id = None;
+            match result.content {
+                Ok((content, line_starts)) => {
+                    self.selected_file = Some(result.path);
+                    self.file_content = Some(content);
+                    self.file_line_starts = Some(line_starts);
+                    self.show_code_display = true;
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.file_content = None;
+                    self.file_line_starts = None;
+                    self.error_message = Some(e);
+                }
             }
         }
     }

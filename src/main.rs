@@ -2,20 +2,6 @@ use rust_and_vulkan::automation::AutomationFileLoader;
 use rust_and_vulkan::{EguiManager, EguiRenderer};
 use rust_and_vulkan::{SdlContext, SdlWindow, VulkanDevice, VulkanInstance, VulkanSurface};
 
-/// Helper function to render code in egui with line numbers
-fn render_code_editor(ui: &mut egui::Ui, code: &str) {
-    egui::ScrollArea::vertical()
-        .auto_shrink([false; 2])
-        .show(ui, |ui| {
-            for (line_num, line) in code.lines().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::GRAY, format!("{:4} | ", line_num + 1));
-                    ui.monospace(line);
-                });
-            }
-        });
-}
-
 use rust_and_vulkan::simple::{
     Buffer, CommandBuffer, DescriptorPool, DescriptorSet, DescriptorSetLayout, Format,
     GraphicsContext, GraphicsPipeline, GraphicsPipelineConfig, PipelineLayout, ShaderModule,
@@ -24,6 +10,36 @@ use rust_and_vulkan::simple::{
 
 use glm as gl;
 use std::fmt::Write as _;
+
+fn render_virtualized_code_view(ui: &mut egui::Ui, content: &str, line_starts: &[usize]) {
+    let total_lines = line_starts.len().saturating_sub(1);
+    if total_lines == 0 {
+        ui.label("(empty file)");
+        return;
+    }
+
+    let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+    egui::ScrollArea::both().auto_shrink([false; 2]).show_rows(
+        ui,
+        row_height,
+        total_lines,
+        |ui, row_range| {
+            for row in row_range {
+                let start = line_starts[row];
+                let end = line_starts[row + 1];
+                let mut line = &content[start..end];
+                if line.ends_with('\n') {
+                    line = &line[..line.len() - 1];
+                }
+
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::GRAY, format!("{:>7} ", row + 1));
+                    ui.monospace(line);
+                });
+            }
+        },
+    );
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -240,13 +256,18 @@ fn main() -> Result<(), String> {
     let mut egui_renderer =
         EguiRenderer::new(&context, swapchain.render_pass()).map_err(|e| e.to_string())?;
 
-    // Simple smoothed frame-rate estimator for UI display.
+    // Simple frame-rate estimator for UI display.
     let mut last_frame_time = std::time::Instant::now();
     let mut refresh_label = String::with_capacity(64); // Pre-allocate to prevent reallocation
     refresh_label.push_str("Current refresh: --.- Hz");
+    let mut last_refresh_label_update = std::time::Instant::now();
+    let refresh_label_update_interval = std::time::Duration::from_millis(250);
 
     // Initialize automation file loader
     let mut automation_loader = AutomationFileLoader::default();
+    automation_loader.refresh_files();
+    let mut filter_last_edit_at: Option<std::time::Instant> = None;
+    let filter_debounce = std::time::Duration::from_millis(250);
 
     // Event + render loop
     let mut quit = false;
@@ -256,8 +277,20 @@ fn main() -> Result<(), String> {
         let frame_dt = now.duration_since(last_frame_time).as_secs_f32();
         last_frame_time = now;
 
-        refresh_label.clear();
-        let _ = write!(refresh_label, "Current refresh: {:.4} Hz", 1.0 / frame_dt);
+        if now.duration_since(last_refresh_label_update) >= refresh_label_update_interval {
+            refresh_label.clear();
+            let hz = if frame_dt > 0.0 { 1.0 / frame_dt } else { 0.0 };
+            let _ = write!(refresh_label, "Current refresh: {:.4} Hz", hz);
+            last_refresh_label_update = now;
+        }
+
+        automation_loader.poll_file_load();
+        if let Some(last_edit) = filter_last_edit_at {
+            if now.duration_since(last_edit) >= filter_debounce {
+                automation_loader.refresh_files();
+                filter_last_edit_at = None;
+            }
+        }
 
         // Poll events
         unsafe {
@@ -397,10 +430,16 @@ fn main() -> Result<(), String> {
                         // File filter
                         ui.horizontal(|ui| {
                             ui.label("Filter:");
-                            let old_filter = automation_loader.file_filter.clone();
-                            ui.text_edit_singleline(&mut automation_loader.file_filter);
-                            if automation_loader.file_filter != old_filter {
+                            let filter_edit =
+                                ui.text_edit_singleline(&mut automation_loader.file_filter);
+                            if filter_edit.changed() {
+                                filter_last_edit_at = Some(now);
+                            }
+                            if filter_edit.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            {
                                 should_refresh = true;
+                                filter_last_edit_at = None;
                             }
                         });
 
@@ -409,28 +448,15 @@ fn main() -> Result<(), String> {
                         // File list
                         ui.label(format!("Files ({}):", automation_loader.files.len()));
 
-                        for file in automation_loader.files.clone() {
-                            let icon = if file.is_dir { "📁" } else { "📄" };
-                            let size_str = if file.is_dir {
-                                String::new()
-                            } else {
-                                format!(" ({})", AutomationFileLoader::format_size(file.size))
-                            };
-
-                            let label = format!("{} {}{}", icon, file.name, size_str);
+                        for file in &automation_loader.files {
+                            let selected =
+                                automation_loader.selected_file.as_ref() == Some(&file.path);
 
                             if ui
-                                .selectable_label(
-                                    automation_loader.selected_file.as_ref() == Some(&file.path),
-                                    label,
-                                )
+                                .selectable_label(selected, file.display_label.as_str())
                                 .clicked()
                             {
-                                if file.is_dir {
-                                    file_to_load = Some(file.path.clone());
-                                } else {
-                                    file_to_load = Some(file.path.clone());
-                                }
+                                file_to_load = Some(file.path.clone());
                             }
                         }
 
@@ -461,7 +487,6 @@ fn main() -> Result<(), String> {
             if automation_loader.show_code_display {
                 // Pre-capture values to avoid borrow conflicts
                 let file_name = automation_loader.current_file_name();
-                let file_content = automation_loader.file_content.clone();
 
                 egui::Window::new("Code Display")
                     .open(&mut automation_loader.show_code_display)
@@ -475,8 +500,13 @@ fn main() -> Result<(), String> {
 
                         ui.separator();
 
-                        if let Some(content) = &file_content {
-                            render_code_editor(ui, content.as_str());
+                        if automation_loader.is_loading_file {
+                            ui.label("Loading file...");
+                        } else if let (Some(content), Some(line_starts)) = (
+                            automation_loader.file_content.as_deref(),
+                            automation_loader.file_line_starts.as_deref(),
+                        ) {
+                            render_virtualized_code_view(ui, content, line_starts);
                         } else {
                             ui.label("No file loaded");
                         }
