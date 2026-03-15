@@ -1019,6 +1019,40 @@ fn main() -> Result<(), String> {
             )
             .map_err(|e| e.to_string())?;
 
+        // Update MVP matrix each frame: rotate around Z.
+        let t = start.elapsed().as_secs_f32();
+        let ident: gl::Mat4 = num_traits::one();
+        let rot = gl::ext::rotate(&ident, t, gl::vec3(0.0, 0.0, 1.0));
+        let proj: gl::Mat4 = num_traits::one();
+        let mvp = proj * rot;
+
+        // Update CPU upload buffer, then copy to device-local MPV buffer.
+        let mpv_data = MPV_PushConstants { mpv: mvp };
+        let mpv_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&mpv_data as *const MPV_PushConstants) as *const u8,
+                std::mem::size_of::<MPV_PushConstants>(),
+            )
+        };
+        mpv_upload_buffer
+            .write(mpv_bytes)
+            .map_err(|e| e.to_string())?;
+
+        let single_command = context
+            .begin_single_time_commands()
+            .map_err(|e| e.to_string())?;
+
+        single_command
+            .copy_vk_buffer(
+                mpv_upload_buffer.vk_buffer(),
+                mpv_buffer.vk_buffer(),
+                std::mem::size_of::<MPV_PushConstants>(),
+                0,
+                0,
+            )
+            .map_err(|e| e.to_string())?;
+        context.end_single_time_commands(single_command).unwrap();
+
         // Record commands
         cmd.begin().map_err(|e| e.to_string())?;
 
@@ -1047,33 +1081,6 @@ fn main() -> Result<(), String> {
         } else {
             cmd.bind_descriptor_sets(&layout, 0, &[&fallback_set]);
         }
-
-        // Update MVP matrix each frame: rotate around Z.
-        let t = start.elapsed().as_secs_f32();
-        let ident: gl::Mat4 = num_traits::one();
-        let rot = gl::ext::rotate(&ident, t, gl::vec3(0.0, 0.0, 1.0));
-        let proj: gl::Mat4 = num_traits::one();
-        let mvp = proj * rot;
-
-        // Update CPU upload buffer, then copy to device-local MPV buffer.
-        let mpv_data = MPV_PushConstants { mpv: mvp };
-        let mpv_bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&mpv_data as *const MPV_PushConstants) as *const u8,
-                std::mem::size_of::<MPV_PushConstants>(),
-            )
-        };
-        mpv_upload_buffer
-            .write(mpv_bytes)
-            .map_err(|e| e.to_string())?;
-        cmd.copy_vk_buffer(
-            mpv_upload_buffer.vk_buffer(),
-            mpv_buffer.vk_buffer(),
-            std::mem::size_of::<MPV_PushConstants>(),
-            0,
-            0,
-        )
-        .map_err(|e| e.to_string())?;
 
         // Push the device addresses + texture index for the fragment shader
         let pc = PushConstants {
