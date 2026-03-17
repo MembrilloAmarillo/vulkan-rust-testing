@@ -16,6 +16,7 @@ pub mod ecss_udp;
 pub mod egui_manager;
 pub mod egui_renderer;
 pub mod simple;
+pub mod xtea_algorithm;
 
 pub use commands::*;
 pub use ecss_automation::*;

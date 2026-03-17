@@ -111,6 +111,26 @@ impl Commands {
         .with_description("Download payload 2 experiment packet")
     }
 
+    pub fn pus_8_1_end_of_mission() -> PreparedCommand {
+        PreparedCommand::new("PUS_8_1_END_OF_MISSION", json!({})).with_description("End of mission")
+    }
+
+    pub fn pus_8_1_end_of_mission_2(decrypted_val: u64) -> PreparedCommand {
+        PreparedCommand::new(
+            "PUS_8_1_END_OF_MISSION_2",
+            json!({ "DecryptedVal": decrypted_val }),
+        )
+        .with_description("End of mission 2 with decryption")
+    }
+
+    pub fn pus_8_1_end_of_mission_3(decrypted_val: u64) -> PreparedCommand {
+        PreparedCommand::new(
+            "PUS_8_1_END_OF_MISSION_3",
+            json!({ "DecryptedVal": decrypted_val }),
+        )
+        .with_description("End of mission 3 with decryption")
+    }
+
     pub fn pus_3_31(entries: Vec<Pus331Entry>) -> Result<PreparedCommand> {
         let n = entries.len();
         ensure_count_matches(n, &entries, "PUS331Body")?;
