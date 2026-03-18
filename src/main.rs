@@ -271,9 +271,21 @@ fn main() -> Result<(), String> {
 
     // Program runner UI state
     let mut program_runner_show_window = true;
-    let program_runner_config_path = std::env::current_dir()
-        .map_err(|e| format!("Failed to read current dir: {}", e))?
-        .join("program_runner.toml");
+    let program_runner_config_path = if std::env::var("APPIMAGE").is_ok() {
+        // Running as AppImage - use home directory for config
+        let config_dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(".config/rust-and-vulkan");
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| format!("Failed to create config directory: {}", e))?;
+        config_dir.join("program_runner.toml")
+    } else {
+        // Running normally - use current directory
+        std::env::current_dir()
+            .map_err(|e| format!("Failed to read current dir: {}", e))?
+            .join("program_runner.toml")
+    };
     let mut program_runner = ProgramRunner::load_or_create(&program_runner_config_path)
         .map_err(|e| format!("Failed to initialize program runner config: {}", e))?;
     let mut program_runner_status = String::new();
@@ -288,7 +300,6 @@ fn main() -> Result<(), String> {
     let mut prg_auto_start = false;
     let mut prg_use_python_venv = false;
     let mut prg_venv_path = String::new();
-    let mut prg_python_executable = String::new();
     let mut prg_use_conda_env = false;
     let mut prg_conda_env_name = String::new();
 
@@ -790,7 +801,6 @@ fn main() -> Result<(), String> {
                                                             }
                                                             RuntimeConfig::PythonVenv {
                                                                 venv_path,
-                                                                python_executable,
                                                             } => ui.small(format!(
                                                                 "🐍 Python Venv: {}",
                                                                 venv_path
@@ -887,26 +897,18 @@ fn main() -> Result<(), String> {
                                                 RuntimeConfig::Direct => {
                                                     prg_use_python_venv = false;
                                                     prg_venv_path.clear();
-                                                    prg_python_executable.clear();
                                                     prg_use_conda_env = false;
                                                     prg_conda_env_name.clear();
                                                 }
-                                                RuntimeConfig::PythonVenv {
-                                                    venv_path,
-                                                    python_executable,
-                                                } => {
+                                                RuntimeConfig::PythonVenv { venv_path } => {
                                                     prg_use_python_venv = true;
                                                     prg_venv_path = venv_path.clone();
-                                                    prg_python_executable = python_executable
-                                                        .clone()
-                                                        .unwrap_or_default();
                                                     prg_use_conda_env = false;
                                                     prg_conda_env_name.clear();
                                                 }
                                                 RuntimeConfig::CondaEnv { env_name } => {
                                                     prg_use_python_venv = false;
                                                     prg_venv_path.clear();
-                                                    prg_python_executable.clear();
                                                     prg_use_conda_env = true;
                                                     prg_conda_env_name = env_name.clone();
                                                 }
@@ -959,31 +961,42 @@ fn main() -> Result<(), String> {
                                     ui.separator();
                                     ui.label("Runtime Environment");
                                     ui.horizontal(|ui| {
-                                        ui.selectable_value(
-                                            &mut prg_use_python_venv,
-                                            false,
-                                            "Direct",
-                                        );
-                                        ui.selectable_value(
-                                            &mut prg_use_python_venv,
-                                            true,
-                                            "Python Venv",
-                                        );
-                                        ui.selectable_value(
-                                            &mut prg_use_conda_env,
-                                            true,
-                                            "Conda Env",
-                                        );
+                                        if ui
+                                            .selectable_value(
+                                                &mut prg_use_python_venv,
+                                                false,
+                                                "Direct",
+                                            )
+                                            .clicked()
+                                        {
+                                            prg_use_conda_env = false;
+                                        }
+                                        if ui
+                                            .selectable_value(
+                                                &mut prg_use_python_venv,
+                                                true,
+                                                "Python Venv",
+                                            )
+                                            .clicked()
+                                        {
+                                            prg_use_conda_env = false;
+                                        }
+                                        if ui
+                                            .selectable_value(
+                                                &mut prg_use_conda_env,
+                                                true,
+                                                "Conda Env",
+                                            )
+                                            .clicked()
+                                        {
+                                            prg_use_python_venv = false;
+                                        }
                                     });
 
                                     if prg_use_python_venv && !prg_use_conda_env {
                                         ui.horizontal(|ui| {
                                             ui.label("Venv path:");
                                             ui.text_edit_singleline(&mut prg_venv_path);
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("Python exec:");
-                                            ui.text_edit_singleline(&mut prg_python_executable);
                                         });
                                     }
 
@@ -1014,18 +1027,6 @@ fn main() -> Result<(), String> {
                                             {
                                                 RuntimeConfig::PythonVenv {
                                                     venv_path: prg_venv_path.trim().to_string(),
-                                                    python_executable: if prg_python_executable
-                                                        .trim()
-                                                        .is_empty()
-                                                    {
-                                                        None
-                                                    } else {
-                                                        Some(
-                                                            prg_python_executable
-                                                                .trim()
-                                                                .to_string(),
-                                                        )
-                                                    },
                                                 }
                                             } else if prg_use_conda_env && !prg_use_python_venv {
                                                 RuntimeConfig::CondaEnv {
@@ -1076,7 +1077,6 @@ fn main() -> Result<(), String> {
                                             prg_auto_start = false;
                                             prg_use_python_venv = false;
                                             prg_venv_path.clear();
-                                            prg_python_executable.clear();
                                             prg_use_conda_env = false;
                                             prg_conda_env_name.clear();
                                         }

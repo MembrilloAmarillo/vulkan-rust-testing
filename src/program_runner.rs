@@ -100,23 +100,12 @@ impl ProgramConfig {
 
         match &self.runtime {
             RuntimeConfig::Direct => {}
-            RuntimeConfig::PythonVenv {
-                venv_path,
-                python_executable,
-            } => {
+            RuntimeConfig::PythonVenv { venv_path } => {
                 if venv_path.trim().is_empty() {
                     return Err(ProgramRunnerError::InvalidConfig(format!(
                         "program '{}' has empty Python venv path",
                         self.id
                     )));
-                }
-                if let Some(py) = python_executable {
-                    if py.trim().is_empty() {
-                        return Err(ProgramRunnerError::InvalidConfig(format!(
-                            "program '{}' has empty python_executable",
-                            self.id
-                        )));
-                    }
                 }
             }
             RuntimeConfig::CondaEnv { env_name } => {
@@ -137,13 +126,8 @@ impl ProgramConfig {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeConfig {
     Direct,
-    PythonVenv {
-        venv_path: String,
-        python_executable: Option<String>,
-    },
-    CondaEnv {
-        env_name: String,
-    },
+    PythonVenv { venv_path: String },
+    CondaEnv { env_name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -266,7 +250,12 @@ impl ProgramRunner {
             cmd.envs(program.env.clone());
         }
 
-        let child = cmd.stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        // Keep output visible in the parent process so failures are visible in the terminal.
+        // When running as a GUI app without a terminal, consider setting up a log file instead.
+        let child = cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()?;
         let handle = self.next_handle;
         self.next_handle = self.next_handle.saturating_add(1);
 
@@ -391,21 +380,25 @@ impl ProgramRunner {
                 }
                 cmd
             }
-            RuntimeConfig::PythonVenv {
-                venv_path,
-                python_executable,
-            } => {
-                let interpreter = python_executable
-                    .clone()
-                    .unwrap_or_else(|| default_venv_python_path(venv_path));
 
-                let mut cmd = Command::new(interpreter);
-                cmd.arg(&program.command);
+            RuntimeConfig::PythonVenv { venv_path } => {
+                let mut command_string = format!(
+                    "source {}/bin/activate && {}",
+                    venv_path.trim_end_matches('/'),
+                    program.command.trim()
+                );
+
                 if !program.args.is_empty() {
-                    cmd.args(&program.args);
+                    command_string.push(' ');
+                    command_string.push_str(&program.args.join(" "));
                 }
+
+                let mut cmd = Command::new("bash");
+                cmd.arg("-lc");
+                cmd.arg(command_string);
                 cmd
             }
+
             RuntimeConfig::CondaEnv { env_name } => {
                 let mut cmd = Command::new("conda");
                 cmd.arg("run");
