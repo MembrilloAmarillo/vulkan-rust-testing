@@ -753,12 +753,12 @@ fn main() -> Result<(), String> {
                                                                 }
                                                             };
 
-                                                            if ui.button("✎").clicked() {
+                                                            if ui.button("\u{270F}").clicked() {
                                                                 edit_program_id =
                                                                     Some(p.id.clone());
                                                             }
 
-                                                            if ui.button("✕").clicked() {
+                                                            if ui.button("\u{2716}").clicked() {
                                                                 remove_program_id =
                                                                     Some(p.id.clone());
                                                             }
@@ -919,14 +919,14 @@ fn main() -> Result<(), String> {
                             // RIGHT COLUMN: Program editor
                             columns[1].vertical(|ui| {
                                 ui.group(|ui| {
-                                    ui.heading("➕ Add / Edit Program");
+                                    ui.heading("\u{2795} Add / Edit Program");
                                     ui.separator();
 
                                     let is_editing = !prg_id.is_empty();
                                     if is_editing {
                                         ui.colored_label(
                                             egui::Color32::from_rgb(100, 180, 220),
-                                            format!("✎ Editing: {}", prg_id),
+                                            format!("\u{270F} Editing: {}", prg_id),
                                         );
                                     }
 

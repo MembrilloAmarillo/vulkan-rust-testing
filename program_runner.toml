@@ -1,17 +1,15 @@
 [application]
 app_name = "AutomationWare"
 app_version = "0.1.0"
-last_opened_unix = 1773825465
+last_opened_unix = 1773835449
 
 [[programs]]
-id = "yamc"
+id = "yamcs"
 name = "YAMCS"
 command = "mvn"
 args = ["yamcs:run"]
 working_dir = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/YAMCS/"
 auto_start = false
-last_run_unix = 1773825465
-last_exit_code = 2
 
 [programs.env]
 
@@ -19,3 +17,69 @@ last_exit_code = 2
 kind = "python_venv"
 venv_path = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/.venv/"
 python_executable = "/home/polaris/devel/ucanfly_cubesat/OPS/MissionControlFrontend/.venv/bin/python"
+
+[[programs]]
+id = "gnuradio"
+name = "GNURadio Companion"
+command = "gnuradio-companion"
+args = []
+working_dir = "/home/ucanfly/devel/ucanfly_cubesat/"
+auto_start = false
+
+[programs.env]
+
+[programs.runtime]
+kind = "conda_env"
+env_name = "activate"
+
+[[programs]]
+id = "Frontend"
+name = "Mission Control Frontend"
+command = "npm"
+args = ["start"]
+working_dir = "/home/ucanfly/devel/ucanfly_cubesat/"
+auto_start = false
+
+[programs.env]
+
+[programs.runtime]
+kind = "conda_env"
+env_name = "activate"
+
+[[programs]]
+id = "Backend"
+name = "Python Backend"
+command = "python"
+args = [
+    "-m,",
+    "app.backend.main",
+]
+working_dir = "/home/ucanfly/devel/ucanfly_cubesat/OPS/MissionControlFrontend"
+auto_start = false
+
+[programs.env]
+
+[programs.runtime]
+kind = "direct"
+
+[[programs]]
+id = "Saschaware"
+name = "SaschaWare"
+command = "ucf_gs_csp"
+args = [
+    "--gui,",
+    "--udp-enable,",
+    "--set-rtable,",
+    '"1/0',
+    "ZMQHUB,",
+    "5/0",
+    'ZMQHUB"',
+]
+working_dir = "/home/ucanfly/devel/ucanfly_cubesat/OPS/csp_client_gnu_radio/ucf_gs_csp/"
+auto_start = false
+
+[programs.env]
+
+[programs.runtime]
+kind = "conda_env"
+env_name = "activate"
